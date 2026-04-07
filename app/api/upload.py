@@ -1,0 +1,97 @@
+"""
+upload.py
+─────────
+POST /upload
+
+Accepts a PDF file, runs the full ingestion pipeline
+(load → split → embed → store), and returns the number of chunks indexed.
+"""
+
+import os
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, UploadFile, File, status
+
+from app.services.document_loader import load_pdf
+from app.services.text_splitter import split_documents
+from app.services.vector_store import add_documents
+from app.models.schemas import UploadResponse
+from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+
+@router.post(
+    "/upload",
+    response_model=UploadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload and index a PDF document",
+    description=(
+        "Accepts a PDF file, extracts its text, splits it into chunks, "
+        "embeds each chunk, and stores them in the vector store. "
+        "Returns the number of chunks successfully indexed."
+    ),
+)
+async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+    """Ingest a PDF into the RAG knowledge base."""
+
+    # ── Validate file type ────────────────────────────────────────────────────
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files are supported. Please upload a .pdf file.",
+        )
+
+    start_time = time.perf_counter()
+    logger.info(f"Upload received: '{file.filename}'")
+
+    # ── Save file to disk ─────────────────────────────────────────────────────
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = upload_dir / file.filename
+    try:
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+    except Exception as e:
+        logger.error(f"Failed to save file '{file.filename}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not save uploaded file: {str(e)}",
+        )
+
+    # ── Run ingestion pipeline ────────────────────────────────────────────────
+    try:
+        # 1. Load PDF pages into LangChain Documents
+        documents = load_pdf(file_path)
+
+        # 2. Split pages into overlapping chunks
+        chunks = split_documents(documents)
+
+        # 3. Embed chunks and store in FAISS
+        add_documents(chunks)
+
+    except Exception as e:
+        logger.error(f"Ingestion failed for '{file.filename}': {e}")
+        # Clean up the saved file if ingestion fails to keep uploads dir clean
+        if file_path.exists():
+            os.remove(file_path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document ingestion failed: {str(e)}",
+        )
+
+    elapsed = time.perf_counter() - start_time
+    logger.info(
+        f"Ingested '{file.filename}' → {len(chunks)} chunk(s) in {elapsed:.2f}s"
+    )
+
+    return UploadResponse(
+        filename=file.filename,
+        chunks_indexed=len(chunks),
+    )

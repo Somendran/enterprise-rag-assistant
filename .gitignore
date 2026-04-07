@@ -1,0 +1,41 @@
+# ── Virtual environments ──────────────────────────────
+venv/
+.venv/
+rag/
+env/
+.env/
+ENV/
+virtualenv/
+.virtualenv/
+
+# ── Environment variables ─────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+
+# ── Python cache ──────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── FAISS index (regenerated from uploads) ────────────
+data/faiss_index/
+
+# ── Uploaded PDFs ─────────────────────────────────────
+data/uploads/
+
+# ── IDE / editor ──────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS files ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────
+*.log
