@@ -1,0 +1,3 @@
+# This directory stores uploaded PDF files.
+# It is created automatically by the application on first upload.
+# This .gitkeep file ensures the directory is tracked by git.

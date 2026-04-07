@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     google_api_key: str
 
     # Model identifiers
-    embedding_model: str = "models/gemini-embedding-004"
-    llm_model: str = "gemini-2.0-flash"
+    embedding_model: str = "models/gemini-embedding-001"
+    llm_model: str = "gemini-2.5-flash"
 
     # ── Storage paths ────────────────────────────────────────────────────────
     # Where uploaded PDFs are saved on disk
@@ -27,7 +27,13 @@ class Settings(BaseSettings):
 
     # ── Retrieval ────────────────────────────────────────────────────────────
     # How many chunks to fetch per query
-    retrieval_top_k: int = 5
+    retrieval_top_k: int = 3
+
+    # ── Embedding ingestion throughput ───────────────────────────────────────
+    # Number of chunks per embedding call during upload ingestion.
+    embedding_batch_size: int = 16
+    # Conservative cap to stay below free-tier request limits.
+    embedding_requests_per_minute: int = 90
 
     # ── Text splitting ───────────────────────────────────────────────────────
     chunk_size: int = 700

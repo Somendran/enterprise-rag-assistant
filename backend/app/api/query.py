@@ -38,10 +38,16 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
     try:
         answer, sources = run_rag_pipeline(request.question)
     except RuntimeError as e:
+        message = str(e)
+        if "quota" in message.lower() or "billing" in message.lower():
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=message,
+            )
         # Expected error when no documents have been indexed yet
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail=message,
         )
     except Exception as e:
         logger.error(f"RAG pipeline error: {e}", exc_info=True)

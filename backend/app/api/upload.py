@@ -73,6 +73,9 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         # 2. Split pages into overlapping chunks
         chunks = split_documents(documents)
 
+        if not chunks:
+            raise ValueError("Document contains no parseable text.")
+
         # 3. Embed chunks and store in FAISS
         add_documents(chunks)
 
@@ -81,9 +84,17 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         # Clean up the saved file if ingestion fails to keep uploads dir clean
         if file_path.exists():
             os.remove(file_path)
+
+        message = str(e)
+        if "quota" in message.lower() or "429" in message:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Document ingestion throttled by Gemini quota: {message}",
+            )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Document ingestion failed: {str(e)}",
+            detail=f"Document ingestion failed: {message}",
         )
 
     elapsed = time.perf_counter() - start_time

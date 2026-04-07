@@ -12,18 +12,54 @@ All other services are called through this one during a query.
 """
 
 import time
+import re
 from typing import Tuple, List
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import HumanMessage
-
 from app.services.retriever import retrieve_relevant_chunks
+from app.services.llm_service import generate_answer
 from app.prompts.qa_prompt import QA_PROMPT
 from app.models.schemas import SourceReference
-from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _clean_answer_text(answer: str) -> str:
+    """
+    Remove citation-style noise from LLM output while preserving
+    markdown formatting for rich rendering in the frontend.
+
+    The API already returns structured sources, so we strip duplicate
+    trailing citation blocks from the answer body.
+    """
+    lines = [line.rstrip() for line in answer.splitlines()]
+    cleaned: list[str] = []
+
+    # Matches lines like:
+    # - "Tutorial 3.pdf, Page: 1"
+    # - "- Report.pdf (Page 2)"
+    citation_line = re.compile(
+        r"^\s*(?:[-*]\s*)?.+\.pdf\s*(?:,|\()\s*page\s*[:\d\s\)]",
+        re.IGNORECASE,
+    )
+
+    for line in lines:
+        text = line.strip()
+        if not text:
+            cleaned.append("")
+            continue
+        if text.lower() in {"sources:", "source:"}:
+            continue
+        if citation_line.match(text):
+            continue
+
+        # Preserve the original line (including markdown formatting)
+        cleaned.append(line)
+
+    # Collapse multiple blank lines and trim outer whitespace.
+    result = "\n".join(cleaned)
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+    return result
 
 
 def _format_context(chunks) -> str:
@@ -90,15 +126,9 @@ def run_rag_pipeline(question: str) -> Tuple[str, List[SourceReference]]:
     filled_prompt = QA_PROMPT.format(context=context, question=question)
 
     # ── Step 4: Call the LLM ─────────────────────────────────────────────────
-    llm = ChatGoogleGenerativeAI(
-        model=settings.llm_model,
-        google_api_key=settings.google_api_key,
-        temperature=0,  # deterministic; important for a factual assistant
-    )
-
-    logger.info(f"Calling LLM ({settings.llm_model}) for question: '{question[:80]}'")
-    response = llm.invoke([HumanMessage(content=filled_prompt)])
-    answer = response.content.strip()
+    answer, model_used = generate_answer(filled_prompt)
+    answer = _clean_answer_text(answer)
+    logger.info("LLM answered using model '%s' for question: '%s'", model_used, question[:80])
 
     # ── Step 5: Extract sources ───────────────────────────────────────────────
     sources = _extract_sources(chunks)
