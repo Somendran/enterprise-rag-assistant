@@ -13,15 +13,26 @@ All other services are called through this one during a query.
 
 import time
 import re
+from dataclasses import dataclass
 from typing import Tuple, List
 
-from app.services.retriever import retrieve_relevant_chunks
+from app.services.retriever import retrieve_relevant_chunks_with_diagnostics, RetrievedChunk
 from app.services.llm_service import generate_answer
 from app.prompts.qa_prompt import QA_PROMPT
-from app.models.schemas import SourceReference
+from app.models.schemas import SourceReference, RetrievalDiagnostics
+from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class PipelineResult:
+    answer: str
+    sources: List[SourceReference]
+    confidence_score: float
+    confidence_level: str
+    diagnostics: RetrievalDiagnostics
 
 
 def _clean_answer_text(answer: str) -> str:
@@ -77,7 +88,7 @@ def _format_context(chunks) -> str:
     return "\n\n".join(sections)
 
 
-def _extract_sources(chunks) -> List[SourceReference]:
+def _extract_sources(chunks: list[RetrievedChunk]) -> List[SourceReference]:
     """
     Deduplicate the source references from the retrieved chunks.
     A (document, page) pair is unique by definition.
@@ -85,16 +96,30 @@ def _extract_sources(chunks) -> List[SourceReference]:
     seen = set()
     sources = []
     for chunk in chunks:
-        source = chunk.metadata.get("source", "unknown")
-        page = chunk.metadata.get("page", 0)
+        source = chunk.document.metadata.get("source", "unknown")
+        page = chunk.document.metadata.get("page", 0)
         key = (source, page)
         if key not in seen:
             seen.add(key)
-            sources.append(SourceReference(document=source, page=page))
+            sources.append(
+                SourceReference(
+                    document=source,
+                    page=page,
+                    relevance_score=round(float(chunk.final_score), 4),
+                )
+            )
     return sources
 
 
-def run_rag_pipeline(question: str) -> Tuple[str, List[SourceReference]]:
+def _confidence_level(confidence: float) -> str:
+    if confidence >= 0.65:
+        return "high"
+    if confidence >= 0.40:
+        return "medium"
+    return "low"
+
+
+def run_rag_pipeline(question: str) -> PipelineResult:
     """
     Execute the complete Retrieval-Augmented Generation pipeline.
 
@@ -117,23 +142,50 @@ def run_rag_pipeline(question: str) -> Tuple[str, List[SourceReference]]:
     start_time = time.perf_counter()
 
     # ── Step 1: Retrieve ─────────────────────────────────────────────────────
-    chunks = retrieve_relevant_chunks(question)
+    chunks, debug = retrieve_relevant_chunks_with_diagnostics(question)
+
+    if not chunks:
+        raise RuntimeError(
+            "No relevant content could be retrieved. Please upload additional documents."
+        )
 
     # ── Step 2: Build context ────────────────────────────────────────────────
-    context = _format_context(chunks)
+    context = _format_context([item.document for item in chunks])
 
     # ── Step 3: Fill the prompt ──────────────────────────────────────────────
     filled_prompt = QA_PROMPT.format(context=context, question=question)
 
     # ── Step 4: Call the LLM ─────────────────────────────────────────────────
-    answer, model_used = generate_answer(filled_prompt)
-    answer = _clean_answer_text(answer)
+    confidence_score = sum(item.final_score for item in chunks) / len(chunks)
+    confidence_level = _confidence_level(confidence_score)
+
+    if confidence_score < settings.answer_low_confidence_threshold:
+        answer = (
+            "I do not have enough grounded evidence in the indexed documents to answer "
+            "this confidently. Please refine your question or upload more relevant material."
+        )
+        model_used = "none-low-confidence"
+    else:
+        answer, model_used = generate_answer(filled_prompt)
+        answer = _clean_answer_text(answer)
     logger.info("LLM answered using model '%s' for question: '%s'", model_used, question[:80])
 
     # ── Step 5: Extract sources ───────────────────────────────────────────────
     sources = _extract_sources(chunks)
+    diagnostics = RetrievalDiagnostics(
+        query_variants_used=debug.query_variants_used,
+        is_broad_question=debug.is_broad_question,
+        fallback_applied=debug.fallback_applied,
+        candidates_considered=debug.candidates_considered,
+    )
 
     elapsed = time.perf_counter() - start_time
     logger.info(f"RAG pipeline completed in {elapsed:.2f}s | sources: {[s.document for s in sources]}")
 
-    return answer, sources
+    return PipelineResult(
+        answer=answer,
+        sources=sources,
+        confidence_score=round(float(confidence_score), 4),
+        confidence_level=confidence_level,
+        diagnostics=diagnostics,
+    )

@@ -7,7 +7,7 @@ explicit and easy to change.
 """
 
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 
 
 # ── /upload ──────────────────────────────────────────────────────────────────
@@ -41,6 +41,19 @@ class SourceReference(BaseModel):
 
     document: str = Field(..., description="Source filename (PDF name).")
     page: int = Field(..., description="Page number within the PDF (1-indexed).")
+    relevance_score: Optional[float] = Field(
+        default=None,
+        description="Normalized relevance confidence in range [0, 1].",
+    )
+
+
+class RetrievalDiagnostics(BaseModel):
+    """Debug-friendly retrieval diagnostics for quality tuning and observability."""
+
+    query_variants_used: List[str] = Field(default_factory=list)
+    is_broad_question: bool = Field(default=False)
+    fallback_applied: bool = Field(default=False)
+    candidates_considered: int = Field(default=0)
 
 
 class QueryResponse(BaseModel):
@@ -50,4 +63,16 @@ class QueryResponse(BaseModel):
     sources: List[SourceReference] = Field(
         default_factory=list,
         description="List of document chunks that informed the answer.",
+    )
+    confidence_score: Optional[float] = Field(
+        default=None,
+        description="Overall normalized grounding confidence in range [0, 1].",
+    )
+    confidence_level: Optional[str] = Field(
+        default=None,
+        description="Confidence bucket derived from confidence_score: high, medium, low.",
+    )
+    diagnostics: Optional[RetrievalDiagnostics] = Field(
+        default=None,
+        description="Retrieval diagnostics emitted when enabled in configuration.",
     )

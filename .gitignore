@@ -23,9 +23,11 @@ __pycache__/
 
 # ── FAISS index (regenerated from uploads) ────────────
 data/faiss_index/
+backend/data/faiss_index/
 
 # ── Uploaded PDFs ─────────────────────────────────────
 data/uploads/
+backend/data/uploads/
 
 # ── IDE / editor ──────────────────────────────────────
 .vscode/

@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, status
 
 from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents
-from app.services.vector_store import add_documents
+from app.services.vector_store import add_documents, is_document_indexed, register_indexed_document
 from app.models.schemas import UploadResponse
 from app.config import settings
 from app.utils.logger import get_logger
@@ -69,6 +69,18 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     try:
         # 1. Load PDF pages into LangChain Documents
         documents = load_pdf(file_path)
+        file_hash = str(documents[0].metadata.get("file_hash", "")) if documents else ""
+        document_id = str(documents[0].metadata.get("document_id", "")) if documents else ""
+
+        if file_hash and is_document_indexed(file_hash):
+            logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
+            if file_path.exists():
+                os.remove(file_path)
+            return UploadResponse(
+                filename=file.filename,
+                chunks_indexed=0,
+                message="Duplicate document detected. Existing index entry was reused.",
+            )
 
         # 2. Split pages into overlapping chunks
         chunks = split_documents(documents)
@@ -78,6 +90,13 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
 
         # 3. Embed chunks and store in FAISS
         add_documents(chunks)
+        if file_hash:
+            register_indexed_document(
+                file_hash=file_hash,
+                filename=file.filename,
+                chunk_count=len(chunks),
+                document_id=document_id,
+            )
 
     except Exception as e:
         logger.error(f"Ingestion failed for '{file.filename}': {e}")

@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.services.rag_pipeline import run_rag_pipeline
 from app.models.schemas import QueryRequest, QueryResponse
+from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,7 +37,7 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
     logger.info(f"Query received: '{request.question[:100]}'")
 
     try:
-        answer, sources = run_rag_pipeline(request.question)
+        result = run_rag_pipeline(request.question)
     except RuntimeError as e:
         message = str(e)
         if "quota" in message.lower() or "billing" in message.lower():
@@ -57,6 +58,18 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
         )
 
     elapsed = time.perf_counter() - start_time
-    logger.info(f"Query answered in {elapsed:.2f}s | sources: {[s.document for s in sources]}")
+    logger.info(
+        "Query answered in %.2fs | confidence=%.3f level=%s | sources=%s",
+        elapsed,
+        result.confidence_score,
+        result.confidence_level,
+        [s.document for s in result.sources],
+    )
 
-    return QueryResponse(answer=answer, sources=sources)
+    return QueryResponse(
+        answer=result.answer,
+        sources=result.sources,
+        confidence_score=result.confidence_score,
+        confidence_level=result.confidence_level,
+        diagnostics=result.diagnostics if settings.enable_retrieval_diagnostics else None,
+    )

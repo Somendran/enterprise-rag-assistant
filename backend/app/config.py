@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # ── Retrieval ────────────────────────────────────────────────────────────
     # How many chunks to fetch per query
     retrieval_top_k: int = 3
+    # Candidate chunks to collect before rerank-lite trims to retrieval_top_k.
+    retrieval_candidate_k: int = 10
+    # If confidence is below this threshold, trigger one deterministic fallback pass.
+    retrieval_low_confidence_threshold: float = 0.30
+    # Floor threshold below which the API should refuse to answer confidently.
+    answer_low_confidence_threshold: float = 0.22
 
     # ── Embedding ingestion throughput ───────────────────────────────────────
     # Number of chunks per embedding call during upload ingestion.
@@ -38,6 +44,10 @@ class Settings(BaseSettings):
     # ── Text splitting ───────────────────────────────────────────────────────
     chunk_size: int = 700
     chunk_overlap: int = 100
+
+    # ── Retrieval behavior toggles ───────────────────────────────────────────
+    enable_retrieval_fallback: bool = True
+    enable_retrieval_diagnostics: bool = True
 
     # Tells pydantic-settings to load a .env file automatically
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
