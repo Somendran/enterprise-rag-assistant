@@ -1,4 +1,4 @@
-# 🏢 Enterprise RAG Assistant
+# 🏢 RAGiT (RAG Assistant)
 
 <div align="center">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" />
@@ -10,7 +10,7 @@
 
 <br/>
 
-Enterprise-focused **Retrieval-Augmented Generation (RAG)** assistant for PDF knowledge bases. Designed for grounded answers, transparent diagnostics, and practical local/cloud deployment matched with a stunning modern web UI.
+**Retrieval-Augmented Generation (RAG)** assistant for knowledge bases. Designed for grounded answers, transparent diagnostics, and practical local/cloud deployment matched with a stunning modern web UI.
 
 ---
 
