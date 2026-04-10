@@ -106,6 +106,21 @@ def _clean_answer_text(answer: str) -> str:
     return result
 
 
+def _dedupe_answer_bullets(answer: str) -> str:
+    """Remove exact duplicate bullets across sections while preserving order."""
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            key = re.sub(r"\s+", " ", stripped[2:].lower()).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+        output.append(line)
+    return "\n".join(output).strip()
+
+
 def _format_context(chunks, max_chars: int) -> str:
     """
     Convert retrieved chunks into a compact context block.
@@ -159,11 +174,16 @@ def _format_context(chunks, max_chars: int) -> str:
     )
 
     sections = []
-    for chunk in ordered_chunks:
+    source_legend: list[str] = []
+    for idx, chunk in enumerate(ordered_chunks, start=1):
         cleaned_text = _trim_low_signal_lines(chunk.page_content.strip())
         cleaned_text = _compress_chunk_text(cleaned_text, limit=450)
         if cleaned_text:
-            sections.append(cleaned_text)
+            source = str(chunk.metadata.get("source", "unknown"))
+            page = int(chunk.metadata.get("page", 0) or 0)
+            source_tag = f"[Source {idx}]"
+            source_legend.append(f"- {source_tag} = {source}, p.{page}")
+            sections.append(f"{source_tag}\n{cleaned_text}")
 
     if not sections:
         return ""
@@ -171,19 +191,27 @@ def _format_context(chunks, max_chars: int) -> str:
     separator = "\n---\n"
     budget = max(500, int(max_chars))
     selected_sections: list[str] = []
+    selected_legend: list[str] = []
     used = 0
-    for section in sections:
+    for section, legend in zip(sections, source_legend):
         section_len = len(section)
         extra = section_len + (len(separator) if selected_sections else 0)
         if selected_sections and (used + extra) > budget:
             break
         if not selected_sections and section_len > budget:
             selected_sections.append(section[:budget].rstrip())
+            selected_legend.append(legend)
             break
         selected_sections.append(section)
+        selected_legend.append(legend)
         used += extra
 
-    return separator.join(selected_sections).rstrip()
+    if not selected_sections:
+        return ""
+
+    legend_block = "Source Reference Guide:\n" + "\n".join(selected_legend)
+    content_block = separator.join(selected_sections).rstrip()
+    return f"{legend_block}\n\nCONTENT EXCERPTS:\n{content_block}".strip()
 
 
 def _is_summary_request(question: str) -> bool:
@@ -301,15 +329,47 @@ def _build_generation_prompt(context: str, question: str, trim_prompt: bool) -> 
     return (
         "Use only CONTENT to answer QUESTION. "
         "No reasoning traces. "
+        "Do not repeat information across sections. "
         "If insufficient evidence, output exactly: I don't know.\n\n"
         "Return markdown sections:\n"
-        "## Executive Summary\n"
+        "## Short Answer\n"
         "## Key Facts\n"
-        "## Risks / Limitations\n\n"
+        "## Missing Information\n"
+        "## Optional Notes\n"
+        "## Confidence Explanation\n\n"
+        "For Key Facts, add source tags like [Source 1] using only source tags provided in CONTENT.\n\n"
         f"CONTENT:\n{context}\n\n"
         f"QUESTION:\n{question}\n\n"
         "ANSWER:"
     )
+
+
+def _append_confidence_explanation(
+    answer: str,
+    confidence_score: float,
+    used_chunks: int,
+    low_confidence_fallback_used: bool,
+) -> str:
+    label = _confidence_level(confidence_score).capitalize()
+    pct = int(max(0.0, min(1.0, confidence_score)) * 100)
+
+    reasons: list[str] = [f"Based on {used_chunks} retrieved section(s)."]
+    if low_confidence_fallback_used:
+        reasons.append("Some details may be incomplete due to partial evidence.")
+    elif confidence_score >= 0.65:
+        reasons.append("Evidence is consistent across the selected context.")
+    else:
+        reasons.append("Evidence coverage is moderate and may miss edge details.")
+
+    explanation = (
+        f"\n\nConfidence: {label} ({pct}%)\n"
+        f"Reason: {reasons[0]} {reasons[1]}"
+    )
+
+    lowered = answer.lower()
+    if "confidence:" in lowered:
+        return answer
+    return (answer + explanation).strip()
 
 
 def run_rag_pipeline(
@@ -500,9 +560,16 @@ def run_rag_pipeline(
             )
         generation_ms = (time.perf_counter() - generation_start) * 1000.0
         answer = _clean_answer_text(answer)
+        answer = _dedupe_answer_bullets(answer)
         if confidence_score < float(settings.answer_low_confidence_threshold):
             low_confidence_fallback_used = True
             answer = _apply_low_confidence_disclaimer(answer)
+        answer = _append_confidence_explanation(
+            answer=answer,
+            confidence_score=confidence_score,
+            used_chunks=len(chunks_for_generation),
+            low_confidence_fallback_used=low_confidence_fallback_used,
+        )
         logger.info("LLM path used=%s question='%s'", model_used, question[:80])
         logger.info(
             "RAG timing | generation_ms=%.1f llm_retry_count=%d llm_retry_reason=%s low_confidence_fallback=%s",

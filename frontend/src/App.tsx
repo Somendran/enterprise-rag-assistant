@@ -80,17 +80,20 @@ function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const uploadFile = async (file: File) => {
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setUploadStatus('Only PDF files are supported. Please upload a .pdf file.');
+  const uploadFiles = async (files: File[]) => {
+    if (!files.length) return;
+
+    const pdfFiles = files.filter((file) => file.name.toLowerCase().endsWith('.pdf'));
+    if (!pdfFiles.length) {
+      setUploadStatus('Only PDF files are supported. Please upload .pdf files.');
       return;
     }
 
     setIsUploading(true);
-    setUploadStatus('Uploading and indexing...');
+    setUploadStatus(`Uploading and indexing ${pdfFiles.length} file(s)...`);
     
     const formData = new FormData();
-    formData.append('file', file);
+    pdfFiles.forEach((file) => formData.append('files', file));
 
     try {
       const response = await axios.post(`${API_BASE}/upload`, formData, {
@@ -98,17 +101,19 @@ function App() {
           'Content-Type': 'multipart/form-data',
         },
       });
-      if (response.data?.message) {
-        setUploadStatus(response.data.message);
-      } else {
-        setUploadStatus(`Success! Indexed ${response.data.chunks_indexed} chunks.`);
-      }
+      const data = response.data;
+      const totalFiles = Number(data?.total_files ?? pdfFiles.length);
+      const processedFiles = Number(data?.processed_files ?? 0);
+      const totalChunks = Number(data?.total_chunks_indexed ?? 0);
+      setUploadStatus(
+        `Upload completed. Processed ${processedFiles}/${totalFiles} files. Indexed ${totalChunks} chunks.`
+      );
     } catch (error) {
       console.error("Upload error:", error);
       if (axios.isAxiosError(error) && error.response?.data?.detail) {
         setUploadStatus(String(error.response.data.detail));
       } else {
-        setUploadStatus("Failed to upload document. Is the backend running?");
+        setUploadStatus("Failed to upload files. Is the backend running?");
       }
     } finally {
       setIsUploading(false);
@@ -118,9 +123,9 @@ function App() {
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    await uploadFile(file);
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
+    await uploadFiles(files);
   };
 
   const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
@@ -142,9 +147,9 @@ function App() {
     setIsDragActive(false);
     if (isUploading || isResetting) return;
 
-    const file = event.dataTransfer.files?.[0];
-    if (!file) return;
-    await uploadFile(file);
+    const files = Array.from(event.dataTransfer.files || []);
+    if (!files.length) return;
+    await uploadFiles(files);
   };
 
   const handleStarterPrompt = (prompt: string) => {
@@ -306,6 +311,7 @@ function App() {
           <input 
             type="file" 
             accept=".pdf" 
+            multiple
             ref={fileInputRef} 
             style={{ display: 'none' }}
             onChange={handleFileUpload}
@@ -393,13 +399,15 @@ function App() {
                     
                     {msg.role === 'assistant' && (
                       <div className="assistant-meta-stack">
-                        <div className={`confidence-pill ${confidenceAccent(msg.confidence_level)}`}>
-                          <ShieldCheck size={14} className="icon-confidence" />
-                          <span>{confidenceLabel(msg.confidence_level)}</span>
-                          {typeof msg.confidence_score === 'number' && (
-                            <strong>{Math.round(msg.confidence_score * 100)}%</strong>
-                          )}
-                        </div>
+                        {(msg.confidence_level || typeof msg.confidence_score === 'number') && (
+                          <div className={`confidence-pill ${confidenceAccent(msg.confidence_level)}`}>
+                            <ShieldCheck size={14} className="icon-confidence" />
+                            <span>{confidenceLabel(msg.confidence_level)}</span>
+                            {typeof msg.confidence_score === 'number' && (
+                              <strong>{Math.round(msg.confidence_score * 100)}%</strong>
+                            )}
+                          </div>
+                        )}
 
                         {msg.diagnostics && (
                           <details className="diagnostics-panel">

@@ -23,7 +23,11 @@ from app.services.vector_store import (
     register_indexed_document,
     reset_vector_store,
 )
-from app.models.schemas import UploadResponse, ResetKnowledgeBaseResponse
+from app.models.schemas import (
+    UploadBatchResponse,
+    UploadItemResult,
+    ResetKnowledgeBaseResponse,
+)
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -75,101 +79,130 @@ async def reset_knowledge_base() -> ResetKnowledgeBaseResponse:
 
 @router.post(
     "/upload",
-    response_model=UploadResponse,
+    response_model=UploadBatchResponse,
     status_code=status.HTTP_200_OK,
-    summary="Upload and index a PDF document",
+    summary="Upload and index one or more PDF documents",
     description=(
-        "Accepts a PDF file, extracts its text, splits it into chunks, "
+        "Accepts one or more PDF files, extracts text, splits into chunks, "
         "embeds each chunk, and stores them in the vector store. "
-        "Returns the number of chunks successfully indexed."
+        "Returns per-file outcomes and aggregate indexing counts."
     ),
 )
-async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
-    """Ingest a PDF into the RAG knowledge base."""
+async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchResponse:
+    """Ingest one or more PDFs into the RAG knowledge base."""
 
-    # ── Validate file type ────────────────────────────────────────────────────
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
+    if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only PDF files are supported. Please upload a .pdf file.",
+            detail="No files received. Please upload at least one .pdf file.",
         )
 
     start_time = time.perf_counter()
-    logger.info(f"Upload received: '{file.filename}'")
-
-    # ── Save file to disk ─────────────────────────────────────────────────────
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    file_path = upload_dir / file.filename
-    try:
-        content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
-    except Exception as e:
-        logger.error(f"Failed to save file '{file.filename}': {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not save uploaded file: {str(e)}",
-        )
+    results: list[UploadItemResult] = []
+    total_chunks_indexed = 0
 
-    # ── Run ingestion pipeline ────────────────────────────────────────────────
-    try:
-        # 1. Load PDF pages into LangChain Documents
-        documents = load_pdf(file_path)
-        file_hash = str(documents[0].metadata.get("file_hash", "")) if documents else ""
-        document_id = str(documents[0].metadata.get("document_id", "")) if documents else ""
+    for file in files:
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            results.append(
+                UploadItemResult(
+                    filename=file.filename or "unknown",
+                    chunks_indexed=0,
+                    status="failed",
+                    message="Only PDF files are supported. Please upload a .pdf file.",
+                )
+            )
+            continue
 
-        if file_hash and is_document_indexed(file_hash):
-            logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
+        logger.info("Upload received: '%s'", file.filename)
+
+        file_path = upload_dir / file.filename
+        try:
+            content = await file.read()
+            with open(file_path, "wb") as f:
+                f.write(content)
+        except Exception as e:
+            logger.error("Failed to save file '%s': %s", file.filename, e)
+            results.append(
+                UploadItemResult(
+                    filename=file.filename,
+                    chunks_indexed=0,
+                    status="failed",
+                    message=f"Could not save uploaded file: {e}",
+                )
+            )
+            continue
+
+        try:
+            documents = load_pdf(file_path)
+            file_hash = str(documents[0].metadata.get("file_hash", "")) if documents else ""
+            document_id = str(documents[0].metadata.get("document_id", "")) if documents else ""
+
+            if file_hash and is_document_indexed(file_hash):
+                logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
+                if file_path.exists():
+                    os.remove(file_path)
+                results.append(
+                    UploadItemResult(
+                        filename=file.filename,
+                        chunks_indexed=0,
+                        status="duplicate",
+                        message="Duplicate document detected. Existing index entry was reused.",
+                    )
+                )
+                continue
+
+            chunks = split_documents(documents)
+            if not chunks:
+                raise ValueError("Document contains no parseable text.")
+
+            add_documents(chunks)
+            if file_hash:
+                register_indexed_document(
+                    file_hash=file_hash,
+                    filename=file.filename,
+                    chunk_count=len(chunks),
+                    document_id=document_id,
+                )
+
+            total_chunks_indexed += len(chunks)
+            results.append(
+                UploadItemResult(
+                    filename=file.filename,
+                    chunks_indexed=len(chunks),
+                    status="success",
+                    message="Document ingested successfully.",
+                )
+            )
+        except Exception as e:
+            logger.error("Ingestion failed for '%s': %s", file.filename, e)
             if file_path.exists():
                 os.remove(file_path)
-            return UploadResponse(
-                filename=file.filename,
-                chunks_indexed=0,
-                message="Duplicate document detected. Existing index entry was reused.",
+            results.append(
+                UploadItemResult(
+                    filename=file.filename,
+                    chunks_indexed=0,
+                    status="failed",
+                    message=f"Document ingestion failed: {e}",
+                )
             )
 
-        # 2. Split pages into overlapping chunks
-        chunks = split_documents(documents)
-
-        if not chunks:
-            raise ValueError("Document contains no parseable text.")
-
-        # 3. Embed chunks and store in FAISS
-        add_documents(chunks)
-        if file_hash:
-            register_indexed_document(
-                file_hash=file_hash,
-                filename=file.filename,
-                chunk_count=len(chunks),
-                document_id=document_id,
-            )
-
-    except Exception as e:
-        logger.error(f"Ingestion failed for '{file.filename}': {e}")
-        # Clean up the saved file if ingestion fails to keep uploads dir clean
-        if file_path.exists():
-            os.remove(file_path)
-
-        message = str(e)
-        if "quota" in message.lower() or "429" in message:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Document ingestion throttled by Gemini quota: {message}",
-            )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Document ingestion failed: {message}",
-        )
-
+    processed_files = sum(1 for item in results if item.status in {"success", "duplicate"})
     elapsed = time.perf_counter() - start_time
     logger.info(
-        f"Ingested '{file.filename}' → {len(chunks)} chunk(s) in {elapsed:.2f}s"
+        "Batch ingest completed in %.2fs | total_files=%d processed_files=%d total_chunks_indexed=%d",
+        elapsed,
+        len(files),
+        processed_files,
+        total_chunks_indexed,
     )
 
-    return UploadResponse(
-        filename=file.filename,
-        chunks_indexed=len(chunks),
+    return UploadBatchResponse(
+        files=results,
+        total_files=len(files),
+        processed_files=processed_files,
+        total_chunks_indexed=total_chunks_indexed,
+        message=f"Upload completed. Processed {processed_files}/{len(files)} files.",
     )

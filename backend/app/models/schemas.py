@@ -22,6 +22,25 @@ class UploadResponse(BaseModel):
     message: str = Field(default="Document ingested successfully.")
 
 
+class UploadItemResult(BaseModel):
+    """Per-file ingestion outcome in a batch upload."""
+
+    filename: str = Field(..., description="Original uploaded filename.")
+    chunks_indexed: int = Field(..., description="Number of chunks indexed for this file.")
+    status: str = Field(..., description="success, duplicate, or failed.")
+    message: str = Field(..., description="Human-readable outcome message for this file.")
+
+
+class UploadBatchResponse(BaseModel):
+    """Returned after processing one or more uploaded PDFs."""
+
+    files: List[UploadItemResult] = Field(default_factory=list)
+    total_files: int = Field(..., description="Total files received in this request.")
+    processed_files: int = Field(..., description="Files processed successfully or as duplicates.")
+    total_chunks_indexed: int = Field(..., description="Total chunks indexed across successful files.")
+    message: str = Field(default="Upload completed.")
+
+
 class ResetKnowledgeBaseResponse(BaseModel):
     """Returned after knowledge base reset completes."""
 
