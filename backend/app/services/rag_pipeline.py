@@ -236,6 +236,26 @@ def _is_summary_request(question: str) -> bool:
     return any(hint in q for hint in summary_hints)
 
 
+def _base_retrieval_signal(chunks: list[RetrievedChunk]) -> float:
+    """Compute a stable retrieval signal from non-reranker components.
+
+    This prevents hard-refusal from depending only on reranker logits,
+    which can be very low for broad summary-style questions.
+    """
+    if not chunks:
+        return 0.0
+
+    values = [
+        max(
+            float(chunk.vector_confidence),
+            float(chunk.lexical_score),
+            float(chunk.bm25_score),
+        )
+        for chunk in chunks
+    ]
+    return sum(values) / len(values)
+
+
 def _extract_sources(chunks: list[RetrievedChunk]) -> List[SourceReference]:
     """
     Deduplicate the source references from the retrieved chunks.
@@ -685,7 +705,9 @@ def run_rag_pipeline(
     )
 
     # ── Step 4: Call centralized generation flow ─────────────────────────────
-    retrieval_score = sum(item.final_score for item in chunks) / len(chunks)
+    rerank_score = sum(item.final_score for item in chunks) / len(chunks)
+    base_signal = _base_retrieval_signal(chunks)
+    retrieval_score = (0.7 * rerank_score) + (0.3 * base_signal)
     confidence_score = retrieval_score
     confidence_level = _confidence_level(confidence_score)
 
@@ -704,10 +726,35 @@ def run_rag_pipeline(
     invalid_citations: list[str] = []
     unsupported_claims_count = 0
     top_chunk_score = max((item.final_score for item in chunks), default=0.0)
+    top_base_signal = max(
+        (
+            max(
+                float(item.vector_confidence),
+                float(item.lexical_score),
+                float(item.bm25_score),
+            )
+            for item in chunks
+        ),
+        default=0.0,
+    )
+    summary_request = _is_summary_request(normalized_question)
 
     hard_refusal = (
         confidence_score < float(settings.answer_hard_refusal_threshold)
         and top_chunk_score < float(settings.low_confidence_min_chunk_score)
+        and top_base_signal < float(settings.low_confidence_min_chunk_score)
+        and (not summary_request)
+    )
+
+    logger.info(
+        "Grounding gate | rerank_score=%.4f base_signal=%.4f blended_score=%.4f top_rerank=%.4f top_base=%.4f summary_request=%s hard_refusal=%s",
+        rerank_score,
+        base_signal,
+        retrieval_score,
+        top_chunk_score,
+        top_base_signal,
+        summary_request,
+        hard_refusal,
     )
 
     if hard_refusal:

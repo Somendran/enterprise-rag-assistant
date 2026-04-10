@@ -10,7 +10,7 @@ so embedding generation does not rely on external API calls.
 from functools import lru_cache
 
 from langchain_core.embeddings import Embeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.config import settings
 from app.utils.logger import get_logger
@@ -86,7 +86,7 @@ def _get_cached_embedding_model() -> Embeddings:
     )
 
     if model_name != configured_model:
-        logger.warning(
+        logger.info(
             "Configured embedding model '%s' is not a local sentence-transformers model. "
             "Using '%s' instead.",
             configured_model,

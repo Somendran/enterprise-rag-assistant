@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     google_api_key: str
 
     # Model identifiers
-    embedding_model: str = "models/gemini-embedding-001"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     llm_model: str = "gemini-2.5-flash"
     # Keep Gemini fallback disabled by default for strict local operation.
     enable_gemini_fallback: bool = False
@@ -85,6 +85,22 @@ class Settings(BaseSettings):
     low_confidence_min_chunk_score: float = 0.18
     # Keep context compact for local generation latency.
     max_context_characters: int = 2200
+    # Structured ingestion + vision enrichment toggles.
+    enable_docling: bool = True
+    enable_ocr: bool = False
+    docling_batch_size: int = 10
+    enable_vision_enrichment: bool = True
+    max_vision_calls_per_doc: int = 10
+    openai_vision_model: str = "gpt-4.1-mini"
+    # Ollama chat endpoint for multimodal models when OpenAI is disabled.
+    local_vision_endpoint: str = "http://localhost:11434/api/chat"
+    local_vision_model: str = ""
+    # Per-chunk metadata enrichment controls.
+    enable_metadata_enrichment: bool = True
+    enable_summary: bool = True
+    summary_max_tokens: int = 20
+    summary_max_chunks: int = 30
+    summary_min_chars: int = 300
     # Lightweight post-generation verification controls.
     enable_verification: bool = True
     verification_similarity_threshold: float = 0.75

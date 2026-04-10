@@ -10,12 +10,15 @@ Accepts a PDF file, runs the full ingestion pipeline
 import os
 import time
 import shutil
+import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, status
 
-from app.services.document_loader import load_pdf
-from app.services.text_splitter import split_documents
+from app.services.document_loader import load_pdf, compute_file_hash
+from app.services.text_splitter import split_documents, chunk_structured_blocks
+from app.services.ingestion.doc_parser import parse_document
+from app.services.ingestion.vision_enricher import enrich_blocks_with_vision, get_last_vision_calls_used
 from app.services.query_cache import clear_query_cache
 from app.services.vector_store import (
     add_documents,
@@ -135,26 +138,58 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
             )
             continue
 
+        file_hash = ""
+        document_id = ""
         try:
-            documents = load_pdf(file_path)
-            file_hash = str(documents[0].metadata.get("file_hash", "")) if documents else ""
-            document_id = str(documents[0].metadata.get("document_id", "")) if documents else ""
+            file_hash = compute_file_hash(file_path)
+            document_id = hashlib.sha1(f"{file.filename}:{file_hash}".encode("utf-8")).hexdigest()[:16]
+        except Exception as e:
+            logger.warning("Could not compute hash for '%s': %s", file.filename, e)
 
-            if file_hash and is_document_indexed(file_hash):
-                logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
-                if file_path.exists():
-                    os.remove(file_path)
-                results.append(
-                    UploadItemResult(
-                        filename=file.filename,
-                        chunks_indexed=0,
-                        status="duplicate",
-                        message="Duplicate document detected. Existing index entry was reused.",
-                    )
+        if file_hash and is_document_indexed(file_hash):
+            logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
+            if file_path.exists():
+                os.remove(file_path)
+            results.append(
+                UploadItemResult(
+                    filename=file.filename,
+                    chunks_indexed=0,
+                    status="duplicate",
+                    message="Duplicate document detected. Existing index entry was reused.",
                 )
-                continue
+            )
+            continue
 
-            chunks = split_documents(documents)
+        try:
+            chunks = []
+            vision_calls_used = 0
+
+            if settings.enable_docling:
+                try:
+                    blocks = parse_document(str(file_path))
+                    if settings.enable_vision_enrichment:
+                        blocks = enrich_blocks_with_vision(blocks)
+                        vision_calls_used = get_last_vision_calls_used()
+
+                    chunks = chunk_structured_blocks(blocks)
+                    logger.info(
+                        "Structured ingestion completed | file=%s blocks=%d chunks=%d vision_calls_used=%d",
+                        file.filename,
+                        len(blocks),
+                        len(chunks),
+                        vision_calls_used,
+                    )
+                except Exception as docling_exc:
+                    logger.warning(
+                        "Structured ingestion failed; falling back to legacy parser | file=%s error=%s",
+                        file.filename,
+                        docling_exc,
+                    )
+
+            if not chunks:
+                documents = load_pdf(file_path)
+                chunks = split_documents(documents)
+
             if not chunks:
                 raise ValueError("Document contains no parseable text.")
 
