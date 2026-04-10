@@ -21,7 +21,8 @@ FastAPI + React application for querying internal PDFs with a retrieval-augmente
 ## Key features
 
 - PDF ingestion with page extraction and overlapping chunking.
-- Multi-query retrieval with rerank-lite scoring.
+- Hybrid retrieval (semantic + lexical + query expansion) with adaptive fast mode.
+- Neural reranker stage with prefiltering and score-gap skip optimization.
 - One-pass deterministic retrieval fallback for low-confidence questions.
 - Grounded answer generation with cleaned citations.
 - Source metadata in responses, including relevance score.
@@ -119,6 +120,9 @@ Backend values are documented in `backend/.env.example`. Important ones include:
 - `LOCAL_LLM_MODEL`
 - `LOCAL_LLM_VALIDATE_MODEL`
 - `LOCAL_LLM_TEMPERATURE`
+- `LLM_MAX_TOKENS`
+- `FAST_MODE_LLM_MAX_TOKENS`
+- `LOCAL_LLM_MAX_ATTEMPTS`
 - `LOCAL_LLM_NUM_PREDICT`
 - `LOCAL_LLM_RETRY_NUM_PREDICT`
 - `LOCAL_LLM_STREAM`
@@ -127,9 +131,17 @@ Backend values are documented in `backend/.env.example`. Important ones include:
 - `LOCAL_LLM_NUM_GPU`
 - `ENABLE_GEMINI_FALLBACK`
 - `MAX_CONTEXT_CHARACTERS`
+- `FAST_MODE_ENABLED`
+- `FAST_MODE_INITIAL_TOP_K`
+- `FAST_MODE_TOP_N`
+- `FAST_MODE_MAX_CONTEXT_CHARACTERS`
 
-- `RETRIEVAL_TOP_K`
-- `RETRIEVAL_CANDIDATE_K`
+- `RETRIEVAL_TOP_N`
+- `RETRIEVAL_INITIAL_TOP_K`
+- `RERANK_TOP_K`
+- `RERANKER_SKIP_IF_SCORE_GAP`
+- `RERANKER_SCORE_GAP_THRESHOLD`
+- `CONTEXT_DOMINANT_GAP_THRESHOLD`
 - `RETRIEVAL_LOW_CONFIDENCE_THRESHOLD`
 - `ANSWER_LOW_CONFIDENCE_THRESHOLD`
 - `ENABLE_RETRIEVAL_FALLBACK`
@@ -141,16 +153,38 @@ Backend values are documented in `backend/.env.example`. Important ones include:
 LOCAL_LLM_MODEL=gemma4:e4b
 LOCAL_LLM_VALIDATE_MODEL=true
 LOCAL_LLM_TEMPERATURE=0.25
+LLM_MAX_TOKENS=256
+FAST_MODE_LLM_MAX_TOKENS=160
 LOCAL_LLM_NUM_PREDICT=256
 LOCAL_LLM_RETRY_NUM_PREDICT=512
+LOCAL_LLM_MAX_ATTEMPTS=2
 LOCAL_LLM_STREAM=true
 LOCAL_LLM_CONNECT_TIMEOUT_SECONDS=10
 LOCAL_LLM_READ_TIMEOUT_SECONDS=150
 LOCAL_LLM_NUM_GPU=-1
 ENABLE_GEMINI_FALLBACK=false
 MAX_CONTEXT_CHARACTERS=2200
-RETRIEVAL_TOP_K=3
+FAST_MODE_ENABLED=true
+FAST_MODE_INITIAL_TOP_K=18
+FAST_MODE_TOP_N=3
+FAST_MODE_MAX_CONTEXT_CHARACTERS=1600
+RETRIEVAL_INITIAL_TOP_K=30
+RETRIEVAL_TOP_N=5
+RERANK_TOP_K=18
+RERANKER_SKIP_IF_SCORE_GAP=true
+RERANKER_SCORE_GAP_THRESHOLD=0.18
+CONTEXT_DOMINANT_GAP_THRESHOLD=0.20
 ```
+
+## Example query usage
+
+```bash
+curl -X POST http://localhost:8000/query \
+	-H "Content-Type: application/json" \
+	-d '{"question":"What is the remote work policy?"}'
+```
+
+Simple queries run in fast mode automatically (smaller retrieval pool, reranker skipped, lower token budget). Complex queries keep the full pipeline (larger candidate pool + reranker + larger context).
 
 ### Troubleshooting
 
@@ -172,7 +206,7 @@ RETRIEVAL_TOP_K=3
 - FAISS is currently the primary vector backend and is intended for single-instance use.
 - The app is optimized for grounded answers; low-confidence queries should refuse rather than hallucinate.
 - Duplicate PDFs are skipped based on content hash.
-- Query logs include stage timing (`retrieval_ms`, `prompt_build_ms`, `generation_ms`) for latency tuning.
+- Query logs include stage timing (`retrieval_ms`, `rerank_ms`, `context_build_ms`, `generation_ms`, `total_pipeline_ms`) plus retry diagnostics.
 
 ## License
 

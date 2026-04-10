@@ -60,8 +60,21 @@ class RetrievalDiagnostics(BaseModel):
 
     query_variants_used: List[str] = Field(default_factory=list)
     is_broad_question: bool = Field(default=False)
+    is_simple_query: bool = Field(default=False)
+    fast_mode_applied: bool = Field(default=False)
     fallback_applied: bool = Field(default=False)
     candidates_considered: int = Field(default=0)
+    reranker_applied: bool = Field(default=False)
+    reranker_skipped_reason: str = Field(default="")
+    retrieval_ms: float = Field(default=0.0)
+    rerank_ms: float = Field(default=0.0)
+    context_build_ms: float = Field(default=0.0)
+    generation_ms: float = Field(default=0.0)
+    total_pipeline_ms: float = Field(default=0.0)
+    llm_retry_count: int = Field(default=0)
+    llm_retry_reason: str = Field(default="")
+    normalization_applied: bool = Field(default=False)
+    low_confidence_fallback_used: bool = Field(default=False)
 
 
 class QueryResponse(BaseModel):

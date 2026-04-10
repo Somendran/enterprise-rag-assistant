@@ -199,8 +199,15 @@ def _validate_configured_local_model_exists() -> None:
         )
 
 
-def call_local_llm(prompt: str) -> str:
-    """Generate an answer from the configured local Ollama endpoint."""
+def call_local_llm(
+    prompt: str,
+    max_tokens_override: int | None = None,
+) -> tuple[str, int, str]:
+    """Generate an answer from local Ollama with at most two total calls.
+
+    Returns:
+        (answer_text, retry_count, retry_reason)
+    """
     _validate_configured_local_model_exists()
 
     # Encourage a direct final answer and reduce token spend on reasoning.
@@ -211,18 +218,13 @@ def call_local_llm(prompt: str) -> str:
         f"{prompt}"
     )
 
-    max_token_plan = [
-        max(1, int(settings.local_llm_num_predict)),
-        max(1, int(settings.local_llm_retry_num_predict)),
-    ]
-
-    # Deduplicate in case both values are the same.
-    deduped_plan: list[int] = []
-    for value in max_token_plan:
-        if value not in deduped_plan:
-            deduped_plan.append(value)
-
+    default_budget = max(1, int(settings.llm_max_tokens or settings.local_llm_num_predict))
+    base_num_predict = max(1, int(max_tokens_override or default_budget))
+    retry_num_predict = max(1, int(settings.local_llm_retry_num_predict))
+    max_attempts = max(1, int(settings.local_llm_max_attempts))
     last_error: str = "Local LLM returned no output."
+    retry_count = 0
+    retry_reason = ""
 
     def _run_local_request(num_predict: int, stream_enabled: bool) -> tuple[dict[str, Any], float]:
         payload = {
@@ -283,8 +285,11 @@ def call_local_llm(prompt: str) -> str:
         elapsed_s = time.perf_counter() - request_start
         return data, elapsed_s
 
-    for attempt, num_predict in enumerate(deduped_plan, start=1):
-        stream_enabled = bool(settings.local_llm_stream)
+    max_attempts = min(2, max_attempts)
+
+    for attempt in range(1, max_attempts + 1):
+        num_predict = base_num_predict if attempt == 1 else retry_num_predict
+        stream_enabled = bool(settings.local_llm_stream) if attempt == 1 else False
         data, elapsed_s = _run_local_request(num_predict=num_predict, stream_enabled=stream_enabled)
 
         done_reason = data.get("done_reason")
@@ -293,13 +298,32 @@ def call_local_llm(prompt: str) -> str:
         raw_thinking = data.get("thinking", "")
         stream_chunk_count = data.get("_stream_chunk_count")
         answer_text = _extract_ollama_text(data)
+        response_empty = len(answer_text.strip()) == 0
+
+        # If stream mode produced no chunks/text, salvage with one non-stream call
+        # at the same token budget to avoid escalating into full retry immediately.
+        if stream_enabled and response_empty and int(stream_chunk_count or 0) == 0:
+            logger.warning(
+                "Local stream produced no chunks. Falling back to non-stream for same attempt."
+            )
+            data, elapsed_s = _run_local_request(num_predict=num_predict, stream_enabled=False)
+            done_reason = data.get("done_reason")
+            eval_count = data.get("eval_count")
+            prompt_eval_count = data.get("prompt_eval_count")
+            raw_thinking = data.get("thinking", "")
+            stream_chunk_count = data.get("_stream_chunk_count")
+            answer_text = _extract_ollama_text(data)
+            response_empty = len(answer_text.strip()) == 0
 
         logger.info(
-            "Local generation stats | prompt_len=%d prompt_eval_count=%s eval_count=%s done_reason=%s elapsed_s=%.3f stream_chunks=%s",
+            "Local generation stats | prompt_len=%d num_predict=%d prompt_eval_count=%s eval_count=%s done_reason=%s response_empty=%s retry_count=%d elapsed_s=%.3f stream_chunks=%s",
             len(prompt_for_model),
+            num_predict,
             prompt_eval_count,
             eval_count,
             done_reason,
+            response_empty,
+            retry_count,
             elapsed_s,
             stream_chunk_count,
         )
@@ -307,39 +331,8 @@ def call_local_llm(prompt: str) -> str:
         logger.info("Local response raw: %r", answer_text)
         logger.info("Ollama raw payload preview: %r", repr(data)[:2000])
 
-        if not answer_text and stream_enabled:
-            logger.warning(
-                "Streamed response was empty; retrying once with stream=False for parser/model compatibility."
-            )
-            data_ns, elapsed_ns = _run_local_request(num_predict=num_predict, stream_enabled=False)
-            done_reason = data_ns.get("done_reason")
-            eval_count = data_ns.get("eval_count")
-            prompt_eval_count = data_ns.get("prompt_eval_count")
-            raw_thinking = data_ns.get("thinking", "")
-            answer_text = _extract_ollama_text(data_ns)
-            logger.info(
-                "Local generation (non-stream retry) stats | prompt_eval_count=%s eval_count=%s done_reason=%s elapsed_s=%.3f",
-                prompt_eval_count,
-                eval_count,
-                done_reason,
-                elapsed_ns,
-            )
-            logger.info("Local response (non-stream retry) length: %d", len(answer_text))
-            logger.info("Local response (non-stream retry) raw: %r", answer_text)
-
-        if answer_text:
-            # If truncated and too short to be useful, retry once with higher budget.
-            if (
-                done_reason == "length"
-                and len(answer_text.strip()) < 30
-                and attempt < len(deduped_plan)
-            ):
-                logger.warning(
-                    "Local answer appears truncated (done_reason=length, len=%d). Retrying with higher num_predict.",
-                    len(answer_text.strip()),
-                )
-                continue
-            return answer_text
+        if not response_empty:
+            return answer_text, retry_count, retry_reason
 
         last_error = (
             "Local LLM returned empty response. "
@@ -347,9 +340,10 @@ def call_local_llm(prompt: str) -> str:
             f"thinking_len={len(str(raw_thinking or ''))}"
         )
 
-        if done_reason == "length" and attempt < len(deduped_plan):
-            logger.warning(
-                "Local LLM stopped by length with empty output. Retrying with higher num_predict.")
+        if response_empty and done_reason == "length" and attempt < max_attempts:
+            retry_count = 1
+            retry_reason = "length"
+            logger.warning("Local LLM hit length cap. Retrying once with higher token budget.")
             continue
 
         logger.warning(
@@ -359,32 +353,13 @@ def call_local_llm(prompt: str) -> str:
             eval_count,
         )
 
+    if retry_reason == "length":
+        logger.warning(
+            "Local retries exhausted with done_reason=length and empty output. Returning conservative fallback."
+        )
+        return "I don't know", retry_count, retry_reason
+
     raise RuntimeError(last_error)
-
-
-def _has_expected_summary_structure(answer: str) -> bool:
-    lowered = answer.lower()
-    return (
-        "## executive summary" in lowered
-        and "## key facts" in lowered
-        and "## risks / limitations" in lowered
-    )
-
-
-def _repair_summary_structure(answer: str) -> str:
-    """Run a single local pass to normalize the answer into required sections."""
-    repair_prompt = (
-        "Reformat the following answer into exactly this structure and do not add new facts:\n\n"
-        "## Executive Summary\n"
-        "- 2 to 3 concise bullets\n\n"
-        "## Key Facts\n"
-        "- 3 to 5 concise bullets\n\n"
-        "## Risks / Limitations\n"
-        "- 1 to 2 concise bullets\n\n"
-        "If original answer has no facts, output exactly: I don't know.\n\n"
-        f"Original answer:\n{answer}"
-    )
-    return call_local_llm(repair_prompt)
 
 
 def call_gemini(prompt: str) -> str:
@@ -420,16 +395,22 @@ def call_gemini(prompt: str) -> str:
         )
 
 
-def generate_answer(prompt: str) -> tuple[str, str]:
+def generate_answer(
+    prompt: str,
+    max_tokens_override: int | None = None,
+) -> tuple[str, str, int, str]:
     """
     Generate an answer using local-first flow with Gemini fallback.
 
     Returns:
-        (answer_text, model_used)
+        (answer_text, model_used, retry_count, retry_reason)
     """
     try:
         logger.info("Calling LOCAL model...")
-        local_answer = call_local_llm(prompt)
+        local_answer, retry_count, retry_reason = call_local_llm(
+            prompt,
+            max_tokens_override=max_tokens_override,
+        )
         cleaned = local_answer.strip()
         logger.info("Local response length: %d", len(cleaned))
         logger.info("Local response raw: %r", cleaned)
@@ -439,17 +420,9 @@ def generate_answer(prompt: str) -> tuple[str, str]:
             if not settings.enable_gemini_fallback:
                 raise RuntimeError("Local response was empty and Gemini fallback is disabled.")
             gemini_answer = call_gemini(prompt)
-            return gemini_answer, "gemini"
+            return gemini_answer, "gemini", retry_count, retry_reason
 
-        # Accept concise outputs including "I don't know" as valid model answers.
-        # Only truly empty outputs are considered a local generation failure.
-        if cleaned.lower() != "i don't know" and not _has_expected_summary_structure(cleaned):
-            logger.info("Local response structure is weak; applying one format-repair pass.")
-            repaired = _repair_summary_structure(cleaned).strip()
-            if repaired:
-                cleaned = repaired
-
-        return cleaned, "local"
+        return cleaned, "local", retry_count, retry_reason
 
     except Exception as exc:
         logger.error("Local model failed: %s", str(exc))
@@ -459,4 +432,4 @@ def generate_answer(prompt: str) -> tuple[str, str]:
                 f"Error: {exc}"
             )
         gemini_answer = call_gemini(prompt)
-        return gemini_answer, "gemini"
+        return gemini_answer, "gemini", 0, ""

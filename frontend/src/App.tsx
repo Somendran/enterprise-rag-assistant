@@ -192,32 +192,90 @@ function App() {
     if (!inputTitle.trim() || isQuerying) return;
 
     const userMsg: Message = { id: Date.now().toString(), role: 'user', content: inputTitle };
-    setMessages(prev => [...prev, userMsg]);
+    const assistantId = (Date.now() + 1).toString();
+    setMessages(prev => [
+      ...prev,
+      userMsg,
+      { id: assistantId, role: 'assistant', content: '' },
+    ]);
     setInputTitle('');
     setIsQuerying(true);
 
     try {
-      const response = await axios.post(`${API_BASE}/query`, { question: userMsg.content });
-      const assistantMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: response.data.answer,
-        sources: response.data.sources,
-        confidence_score: response.data.confidence_score,
-        confidence_level: response.data.confidence_level,
-        diagnostics: response.data.diagnostics,
+      const response = await fetch(`${API_BASE}/query/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: userMsg.content }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Streaming request failed with status ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const applyChunk = (text: string) => {
+        if (!text) return;
+        setMessages(prev => prev.map(msg => (
+          msg.id === assistantId
+            ? { ...msg, content: `${msg.content}${text}` }
+            : msg
+        )));
       };
-      setMessages(prev => [...prev, assistantMsg]);
+
+      const applyDone = (payload: any) => {
+        setMessages(prev => prev.map(msg => (
+          msg.id === assistantId
+            ? {
+                ...msg,
+                content: payload.answer || msg.content,
+                sources: payload.sources,
+                confidence_score: payload.confidence_score,
+                confidence_level: payload.confidence_level,
+                diagnostics: payload.diagnostics,
+              }
+            : msg
+        )));
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+
+        for (const eventBlock of events) {
+          const lines = eventBlock.split('\n');
+          const eventName = lines.find(line => line.startsWith('event:'))?.replace('event:', '').trim();
+          const dataLine = lines.find(line => line.startsWith('data:'))?.replace('data:', '').trim();
+          if (!eventName || !dataLine) continue;
+
+          const payload = JSON.parse(dataLine);
+
+          if (eventName === 'chunk') {
+            applyChunk(String(payload.text || ''));
+          } else if (eventName === 'done') {
+            applyDone(payload);
+          } else if (eventName === 'error') {
+            throw new Error(String(payload.detail || 'Streaming query failed'));
+          }
+        }
+      }
     } catch (error) {
       console.error("Query error:", error);
-      const errorMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: axios.isAxiosError(error) && error.response?.data?.detail
-          ? String(error.response.data.detail)
-          : "Sorry, there was an error processing your request. Please ensure the backend server is running."
-      };
-      setMessages(prev => [...prev, errorMsg]);
+      const errorText = axios.isAxiosError(error) && error.response?.data?.detail
+        ? String(error.response.data.detail)
+        : "Sorry, there was an error processing your request. Please ensure the backend server is running.";
+
+      setMessages(prev => prev.map(msg => (
+        msg.id === assistantId
+          ? { ...msg, content: errorText }
+          : msg
+      )));
     } finally {
       setIsQuerying(false);
     }
