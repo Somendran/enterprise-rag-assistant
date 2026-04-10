@@ -27,14 +27,20 @@ import json
 import hashlib
 import re
 import threading
+import math
 from pathlib import Path
 from typing import List, Optional, Any
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.embeddings import Embeddings
 from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
 
-from app.services.embedding_service import get_embedding_model
+from app.services.embedding_service import (
+    get_embedding_model,
+    is_local_embedding_backend,
+    embedding_backend_name,
+)
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -272,38 +278,93 @@ def add_documents(chunks: List[Document]) -> FAISS:
         embeddings = get_embedding_model()
         index_path = _index_path()
         batch_size = max(1, settings.embedding_batch_size)
-        rpm = settings.embedding_requests_per_minute
-        is_local_hf = settings.embedding_model.startswith("sentence-transformers/")
-        rate_limit_enabled = (rpm is not None and rpm > 0) and not is_local_hf
+        parallel_workers = max(1, settings.embedding_parallel_workers)
+        backend_name = embedding_backend_name(embeddings)
+        is_local_backend = is_local_embedding_backend(embeddings)
 
         # Ensure the parent directory exists
         Path(index_path).parent.mkdir(parents=True, exist_ok=True)
 
         texts = [doc.page_content for doc in chunks]
         metadatas = [doc.metadata for doc in chunks]
+        total_chunks = len(texts)
+        total_batches = math.ceil(total_chunks / batch_size) if total_chunks else 0
 
         logger.info(
-            "Embedding %d chunk(s) with batch_size=%d, rate_limit_enabled=%s, target_rpm=%s",
-            len(texts),
+            "Embedding start | backend=%s total_chunks=%d batch_size=%d total_batches=%d parallel_workers=%d",
+            backend_name,
+            total_chunks,
             batch_size,
-            rate_limit_enabled,
-            rpm,
+            total_batches,
+            parallel_workers,
         )
 
         vectors: list[list[float]] = []
-        for start in range(0, len(texts), batch_size):
-            batch_texts = texts[start : start + batch_size]
-            batch_start = time.perf_counter()
-            vectors.extend(embeddings.embed_documents(batch_texts))
+        batch_inputs = [texts[start : start + batch_size] for start in range(0, total_chunks, batch_size)]
+        embedding_start = time.perf_counter()
 
-            # For API-based embeddings, throttle requests/minute conservatively.
-            # For local HF embeddings, throttling is skipped for max throughput.
-            if rate_limit_enabled:
-                target_batch_seconds = 60.0 / rpm
-                elapsed = time.perf_counter() - batch_start
-                sleep_for = max(0.0, target_batch_seconds - elapsed)
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
+        # Safe default: keep deterministic sequential execution for local backends.
+        # Optional parallel mode is allowed only for non-local backends to avoid
+        # thread-safety issues in local model runtimes.
+        if parallel_workers > 1 and not is_local_backend:
+            ordered_vectors: list[Optional[list[list[float]]]] = [None] * len(batch_inputs)
+
+            def _embed_batch(i: int, batch_texts: list[str]) -> tuple[int, list[list[float]], float]:
+                t0 = time.perf_counter()
+                result = embeddings.embed_documents(batch_texts)
+                elapsed_s = time.perf_counter() - t0
+                return i, result, elapsed_s
+
+            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+                futures = [
+                    executor.submit(_embed_batch, i, batch_texts)
+                    for i, batch_texts in enumerate(batch_inputs)
+                ]
+                for future in futures:
+                    i, result, elapsed_s = future.result()
+                    ordered_vectors[i] = result
+                    logger.info(
+                        "Embedding batch %d/%d completed in %.3fs (items=%d)",
+                        i + 1,
+                        total_batches,
+                        elapsed_s,
+                        len(batch_inputs[i]),
+                    )
+
+            for i, maybe_vectors in enumerate(ordered_vectors):
+                if maybe_vectors is None:
+                    raise RuntimeError(f"Missing embedding results for batch {i + 1}/{total_batches}")
+                vectors.extend(maybe_vectors)
+        else:
+            if parallel_workers > 1 and is_local_backend:
+                logger.info(
+                    "Parallel embedding requested (%d workers) but backend=%s is kept sequential for safety.",
+                    parallel_workers,
+                    backend_name,
+                )
+
+            for i, batch_texts in enumerate(batch_inputs, start=1):
+                batch_start = time.perf_counter()
+                batch_vectors = embeddings.embed_documents(batch_texts)
+                vectors.extend(batch_vectors)
+                batch_elapsed = time.perf_counter() - batch_start
+                logger.info(
+                    "Embedding batch %d/%d completed in %.3fs (items=%d)",
+                    i,
+                    total_batches,
+                    batch_elapsed,
+                    len(batch_texts),
+                )
+
+        embedding_elapsed = time.perf_counter() - embedding_start
+        logger.info(
+            "Embedding complete | backend=%s total_chunks=%d total_batches=%d total_time_s=%.3f avg_batch_time_s=%.3f",
+            backend_name,
+            total_chunks,
+            total_batches,
+            embedding_elapsed,
+            (embedding_elapsed / total_batches) if total_batches else 0.0,
+        )
 
         text_embeddings = list(zip(texts, vectors))
         new_dim = len(vectors[0]) if vectors else None
@@ -356,3 +417,36 @@ def load_store() -> Optional[FAISS]:
     global _store
     _store = None          # clear cache to force a fresh load
     return get_or_create_store()
+
+
+def get_knowledge_base_version() -> str:
+    """
+    Return a lightweight version string for cache invalidation.
+
+    The value changes whenever persisted index metadata or registry file mtime changes.
+    """
+    index_path = Path(_index_path())
+    if not index_path.exists():
+        return "empty"
+
+    meta_mtime = _meta_path(str(index_path)).stat().st_mtime if _meta_path(str(index_path)).exists() else 0
+    registry_mtime = _doc_registry_path(str(index_path)).stat().st_mtime if _doc_registry_path(str(index_path)).exists() else 0
+    index_mtime = index_path.stat().st_mtime
+    return f"{settings.embedding_model}:{int(max(meta_mtime, registry_mtime, index_mtime))}"
+
+
+def reset_vector_store() -> bool:
+    """
+    Reset active vector store by clearing in-memory cache and deleting persisted index.
+
+    Returns:
+        True if persisted index path existed and was removed, False otherwise.
+    """
+    global _store
+
+    with _write_lock:
+        index_path = _index_path()
+        existed = Path(index_path).exists()
+        _store = None
+        _reset_persisted_index(index_path)
+        return existed

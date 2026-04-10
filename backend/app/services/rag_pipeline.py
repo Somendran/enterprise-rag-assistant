@@ -13,11 +13,15 @@ All other services are called through this one during a query.
 
 import time
 import re
+import unicodedata
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Tuple, List
+from typing import List
 
 from app.services.retriever import retrieve_relevant_chunks_with_diagnostics, RetrievedChunk
 from app.services.llm_service import generate_answer
+from app.services.query_cache import build_cache_key, get_cached_result, set_cached_result
+from app.services.vector_store import get_knowledge_base_version
 from app.prompts.qa_prompt import QA_PROMPT
 from app.models.schemas import SourceReference, RetrievalDiagnostics
 from app.config import settings
@@ -33,6 +37,26 @@ class PipelineResult:
     confidence_score: float
     confidence_level: str
     diagnostics: RetrievalDiagnostics
+
+
+def _result_to_payload(result: PipelineResult) -> dict:
+    return {
+        "answer": result.answer,
+        "sources": [src.model_dump() for src in result.sources],
+        "confidence_score": result.confidence_score,
+        "confidence_level": result.confidence_level,
+        "diagnostics": result.diagnostics.model_dump(),
+    }
+
+
+def _payload_to_result(payload: dict) -> PipelineResult:
+    return PipelineResult(
+        answer=str(payload.get("answer", "")),
+        sources=[SourceReference(**src) for src in payload.get("sources", [])],
+        confidence_score=float(payload.get("confidence_score", 0.0)),
+        confidence_level=str(payload.get("confidence_level", "low")),
+        diagnostics=RetrievalDiagnostics(**payload.get("diagnostics", {})),
+    )
 
 
 def _clean_answer_text(answer: str) -> str:
@@ -75,17 +99,135 @@ def _clean_answer_text(answer: str) -> str:
 
 def _format_context(chunks) -> str:
     """
-    Convert a list of Document chunks into a single context string that
-    the prompt can consume.  Each chunk is labelled with its source.
+    Convert retrieved chunks into a cleaned, compact context block.
+
+    Cleaning goals:
+    - Remove OCR artefacts and encoding noise.
+    - Repair broken line wraps and hyphenated word splits.
+    - Keep only text content (no metadata labels).
+    - Present chunks with explicit separators for local-model readability.
     """
+    def _compress_chunk_text(text: str, limit: int = 450) -> str:
+        if len(text) <= limit:
+            return text
+
+        # Prefer ending on sentence punctuation when available.
+        candidates = [text.rfind(".", 0, limit), text.rfind("!", 0, limit), text.rfind("?", 0, limit)]
+        sentence_end = max(candidates)
+        if sentence_end >= int(limit * 0.6):
+            return text[: sentence_end + 1].strip()
+
+        # Otherwise cut on the nearest word boundary.
+        space_end = text.rfind(" ", 0, limit)
+        if space_end > 0:
+            return text[:space_end].strip()
+
+        return text[:limit].strip()
+
+    def _clean_chunk_text(text: str) -> str:
+        # Normalize line endings first.
+        cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Remove common OCR replacement chars and normalize to ASCII.
+        cleaned = cleaned.replace("\ufffd", " ").replace("�", " ")
+        cleaned = unicodedata.normalize("NFKD", cleaned).encode("ascii", "ignore").decode("ascii")
+
+        # Repair hard hyphenation and intra-word line breaks.
+        cleaned = cleaned.replace("-\n", "")
+        cleaned = re.sub(r"(?<=\w)\n(?=\w)", " ", cleaned)
+
+        # Remove metadata labels if present in chunk text.
+        cleaned = re.sub(r"\[Excerpt\s+\d+\s*\|\s*Document:.*?\]", "", cleaned)
+
+        # Drop common low-signal lines that hurt summarization quality.
+        noise_patterns = [
+            r"^contact\b",
+            r"investor relations",
+            r"sustainability@",
+            r"org\s*no\b",
+            r"annual report\s*\d{4}",
+            r"permission of",
+            r"machine-readable medium",
+            r"@\w+\.\w+",
+        ]
+
+        def _is_noise_line(line: str) -> bool:
+            lowered = line.lower().strip()
+            if len(lowered) < 3:
+                return True
+            return any(re.search(pattern, lowered, re.IGNORECASE) for pattern in noise_patterns)
+
+        # Merge fragmented lines into paragraph-like sentences.
+        lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
+        lines = [line for line in lines if not _is_noise_line(line)]
+
+        # Keep a fact-dense subset first when chunk has many lines.
+        def _line_score(line: str) -> int:
+            has_number = 1 if re.search(r"\d", line) else 0
+            length_score = min(len(line) // 40, 3)
+            return has_number + length_score
+
+        if len(lines) > 8:
+            lines = sorted(lines, key=_line_score, reverse=True)[:8]
+        merged: list[str] = []
+        current = ""
+        for line in lines:
+            if not current:
+                current = line
+                continue
+
+            if re.search(r"[.!?:;)]$", current):
+                merged.append(current)
+                current = line
+            else:
+                current = f"{current} {line}"
+
+        if current:
+            merged.append(current)
+
+        cleaned = "\n".join(merged)
+
+        # Final whitespace normalization.
+        cleaned = re.sub(r"\n{2,}", "\n", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        return cleaned.strip()
+
+    # Improve coherence by presenting chunks in source/page order.
+    ordered_chunks = sorted(
+        chunks,
+        key=lambda d: (
+            str(d.metadata.get("source", "unknown")),
+            int(d.metadata.get("page", 0) or 0),
+        ),
+    )
+
     sections = []
-    for i, chunk in enumerate(chunks, start=1):
-        source = chunk.metadata.get("source", "unknown")
-        page = chunk.metadata.get("page", "?")
-        sections.append(
-            f"[Excerpt {i} | Document: {source} | Page: {page}]\n{chunk.page_content}"
-        )
-    return "\n\n".join(sections)
+    for chunk in ordered_chunks:
+        cleaned_text = _clean_chunk_text(chunk.page_content)
+        cleaned_text = _compress_chunk_text(cleaned_text, limit=450)
+        if cleaned_text:
+            sections.append(cleaned_text)
+
+    if not sections:
+        return ""
+
+    context = "\n---\n".join(sections)
+    max_chars = max(500, settings.max_context_characters)
+    if len(context) > max_chars:
+        return context[:max_chars].rstrip()
+    return context
+
+
+def _is_summary_request(question: str) -> bool:
+    q = question.lower()
+    summary_hints = (
+        "summarize",
+        "summary",
+        "key points",
+        "overview",
+        "high level",
+    )
+    return any(hint in q for hint in summary_hints)
 
 
 def _extract_sources(chunks: list[RetrievedChunk]) -> List[SourceReference]:
@@ -141,8 +283,18 @@ def run_rag_pipeline(question: str) -> PipelineResult:
     """
     start_time = time.perf_counter()
 
+    if settings.enable_query_cache:
+        kb_version = get_knowledge_base_version()
+        cache_key = build_cache_key(question=question, kb_version=kb_version)
+        cached_payload = get_cached_result(cache_key)
+        if cached_payload is not None:
+            logger.info("Cache hit for question: '%s'", question[:80])
+            return _payload_to_result(deepcopy(cached_payload))
+
     # ── Step 1: Retrieve ─────────────────────────────────────────────────────
+    retrieval_start = time.perf_counter()
     chunks, debug = retrieve_relevant_chunks_with_diagnostics(question)
+    retrieval_ms = (time.perf_counter() - retrieval_start) * 1000.0
 
     if not chunks:
         raise RuntimeError(
@@ -150,12 +302,30 @@ def run_rag_pipeline(question: str) -> PipelineResult:
         )
 
     # ── Step 2: Build context ────────────────────────────────────────────────
-    context = _format_context([item.document for item in chunks])
+    prompt_build_start = time.perf_counter()
+    chunks_for_generation = chunks
+    if _is_summary_request(question):
+        chunks_for_generation = chunks[:3]
+
+    context = _format_context([item.document for item in chunks_for_generation])
+    logger.info(
+        "Cleaned context length=%d chars | chunks_used=%d | sample=%r",
+        len(context),
+        len(chunks_for_generation),
+        context[:300],
+    )
 
     # ── Step 3: Fill the prompt ──────────────────────────────────────────────
     filled_prompt = QA_PROMPT.format(context=context, question=question)
+    prompt_build_ms = (time.perf_counter() - prompt_build_start) * 1000.0
+    logger.info(
+        "RAG timing | retrieval_ms=%.1f prompt_build_ms=%.1f context_chars=%d",
+        retrieval_ms,
+        prompt_build_ms,
+        len(context),
+    )
 
-    # ── Step 4: Call the LLM ─────────────────────────────────────────────────
+    # ── Step 4: Call centralized generation flow ─────────────────────────────
     confidence_score = sum(item.final_score for item in chunks) / len(chunks)
     confidence_level = _confidence_level(confidence_score)
 
@@ -166,12 +336,17 @@ def run_rag_pipeline(question: str) -> PipelineResult:
         )
         model_used = "none-low-confidence"
     else:
+        generation_start = time.perf_counter()
         answer, model_used = generate_answer(filled_prompt)
+        generation_ms = (time.perf_counter() - generation_start) * 1000.0
         answer = _clean_answer_text(answer)
-    logger.info("LLM answered using model '%s' for question: '%s'", model_used, question[:80])
+        logger.info("LLM path used=%s question='%s'", model_used, question[:80])
+        logger.info("RAG timing | generation_ms=%.1f", generation_ms)
+    if model_used.startswith("none"):
+        logger.info("LLM path used=%s question='%s'", model_used, question[:80])
 
     # ── Step 5: Extract sources ───────────────────────────────────────────────
-    sources = _extract_sources(chunks)
+    sources = _extract_sources(chunks_for_generation)
     diagnostics = RetrievalDiagnostics(
         query_variants_used=debug.query_variants_used,
         is_broad_question=debug.is_broad_question,
@@ -182,10 +357,19 @@ def run_rag_pipeline(question: str) -> PipelineResult:
     elapsed = time.perf_counter() - start_time
     logger.info(f"RAG pipeline completed in {elapsed:.2f}s | sources: {[s.document for s in sources]}")
 
-    return PipelineResult(
+    result = PipelineResult(
         answer=answer,
         sources=sources,
         confidence_score=round(float(confidence_score), 4),
         confidence_level=confidence_level,
         diagnostics=diagnostics,
     )
+
+    if settings.enable_query_cache:
+        set_cached_result(
+            cache_key=cache_key,
+            payload=_result_to_payload(result),
+            ttl_seconds=settings.query_cache_ttl_seconds,
+        )
+
+    return result

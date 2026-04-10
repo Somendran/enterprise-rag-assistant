@@ -60,6 +60,18 @@ class LocalHuggingFaceEmbeddings(Embeddings):
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
 
+
+def is_local_embedding_backend(embeddings: Embeddings) -> bool:
+    """Return True when the active embeddings instance runs locally."""
+    return isinstance(embeddings, LocalHuggingFaceEmbeddings)
+
+
+def embedding_backend_name(embeddings: Embeddings) -> str:
+    """Best-effort human-readable backend name for diagnostics."""
+    if is_local_embedding_backend(embeddings):
+        return "local_sentence_transformers"
+    return type(embeddings).__name__
+
 def get_embedding_model() -> Embeddings:
     return _get_cached_embedding_model()
 

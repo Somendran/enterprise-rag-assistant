@@ -9,20 +9,68 @@ Accepts a PDF file, runs the full ingestion pipeline
 
 import os
 import time
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, status
 
 from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents
-from app.services.vector_store import add_documents, is_document_indexed, register_indexed_document
-from app.models.schemas import UploadResponse
+from app.services.query_cache import clear_query_cache
+from app.services.vector_store import (
+    add_documents,
+    is_document_indexed,
+    register_indexed_document,
+    reset_vector_store,
+)
+from app.models.schemas import UploadResponse, ResetKnowledgeBaseResponse
 from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+@router.post(
+    "/knowledge-base/reset",
+    response_model=ResetKnowledgeBaseResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reset knowledge base",
+    description="Deletes uploaded PDFs and clears persisted vector index data.",
+)
+async def reset_knowledge_base() -> ResetKnowledgeBaseResponse:
+    """Clear indexed data and uploaded files for a fresh knowledge base state."""
+    uploads_deleted = 0
+    upload_dir = Path(settings.upload_dir)
+
+    try:
+        if upload_dir.exists():
+            for child in upload_dir.iterdir():
+                if child.is_file():
+                    child.unlink(missing_ok=True)
+                    uploads_deleted += 1
+                elif child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+
+        index_cleared = reset_vector_store()
+        clear_query_cache()
+        logger.info(
+            "Knowledge base reset completed | uploads_deleted=%d index_cleared=%s",
+            uploads_deleted,
+            index_cleared,
+        )
+        return ResetKnowledgeBaseResponse(
+            message="Knowledge base reset successfully.",
+            index_cleared=index_cleared,
+            uploads_deleted=uploads_deleted,
+        )
+    except Exception as e:
+        logger.error("Failed to reset knowledge base: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset knowledge base. Please try again.",
+        )
 
 
 @router.post(

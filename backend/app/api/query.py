@@ -40,7 +40,14 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
         result = run_rag_pipeline(request.question)
     except RuntimeError as e:
         message = str(e)
-        if "quota" in message.lower() or "billing" in message.lower():
+        lowered = message.lower()
+        if (
+            "quota" in lowered
+            or "billing" in lowered
+            or "rate limit" in lowered
+            or "retry after" in lowered
+            or "too many requests" in lowered
+        ):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=message,

@@ -22,6 +22,14 @@ class UploadResponse(BaseModel):
     message: str = Field(default="Document ingested successfully.")
 
 
+class ResetKnowledgeBaseResponse(BaseModel):
+    """Returned after knowledge base reset completes."""
+
+    message: str = Field(..., description="Result message for reset action.")
+    index_cleared: bool = Field(..., description="Whether FAISS index data was removed.")
+    uploads_deleted: int = Field(..., description="Number of uploaded files deleted.")
+
+
 # ── /query ───────────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
