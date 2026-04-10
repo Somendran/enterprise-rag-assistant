@@ -12,9 +12,10 @@ FastAPI + React application for querying internal PDFs with a retrieval-augmente
 
 ## Current architecture
 
-- Backend: FastAPI, LangChain, FAISS, Gemini 2.5 Flash.
+- Backend: FastAPI, LangChain, FAISS, local Ollama generation (Gemma 4 by default).
 - Frontend: React 19 + TypeScript + Vite.
-- Embeddings: Gemini embeddings or local Hugging Face fallback.
+- Embeddings: Local sentence-transformers (Hugging Face).
+- LLM strategy: Local-first; optional Gemini fallback (disabled by default).
 - Storage: Local uploads directory plus persisted FAISS index.
 
 ## Key features
@@ -37,7 +38,9 @@ FastAPI + React application for querying internal PDFs with a retrieval-augmente
 
 - Python 3.10+
 - Node.js 18+
-- A valid Google API key for Gemini access
+- Ollama installed and running locally (`http://localhost:11434`)
+- Local Ollama model pulled (default: `gemma4:e4b`)
+- Optional: Google API key only if you enable Gemini fallback
 
 ## Backend setup
 
@@ -50,9 +53,21 @@ pip install -r requirements.txt
 
 Create a backend `.env` file from `backend/.env.example` and set at least:
 
-- `GOOGLE_API_KEY`
-- `EMBEDDING_MODEL`
-- `LLM_MODEL`
+- `LOCAL_LLM_ENDPOINT`
+- `LOCAL_LLM_MODEL`
+- `LOCAL_LLM_VALIDATE_MODEL`
+
+Pull the default local model before running queries:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" pull gemma4:e4b
+```
+
+Validate it exists:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" show gemma4:e4b
+```
 
 Run the API:
 
@@ -100,6 +115,19 @@ Basic health check for the API.
 
 Backend values are documented in `backend/.env.example`. Important ones include:
 
+- `LOCAL_LLM_ENDPOINT`
+- `LOCAL_LLM_MODEL`
+- `LOCAL_LLM_VALIDATE_MODEL`
+- `LOCAL_LLM_TEMPERATURE`
+- `LOCAL_LLM_NUM_PREDICT`
+- `LOCAL_LLM_RETRY_NUM_PREDICT`
+- `LOCAL_LLM_STREAM`
+- `LOCAL_LLM_CONNECT_TIMEOUT_SECONDS`
+- `LOCAL_LLM_READ_TIMEOUT_SECONDS`
+- `LOCAL_LLM_NUM_GPU`
+- `ENABLE_GEMINI_FALLBACK`
+- `MAX_CONTEXT_CHARACTERS`
+
 - `RETRIEVAL_TOP_K`
 - `RETRIEVAL_CANDIDATE_K`
 - `RETRIEVAL_LOW_CONFIDENCE_THRESHOLD`
@@ -107,11 +135,44 @@ Backend values are documented in `backend/.env.example`. Important ones include:
 - `ENABLE_RETRIEVAL_FALLBACK`
 - `ENABLE_RETRIEVAL_DIAGNOSTICS`
 
+### Recommended local-fast profile
+
+```env
+LOCAL_LLM_MODEL=gemma4:e4b
+LOCAL_LLM_VALIDATE_MODEL=true
+LOCAL_LLM_TEMPERATURE=0.25
+LOCAL_LLM_NUM_PREDICT=256
+LOCAL_LLM_RETRY_NUM_PREDICT=512
+LOCAL_LLM_STREAM=true
+LOCAL_LLM_CONNECT_TIMEOUT_SECONDS=10
+LOCAL_LLM_READ_TIMEOUT_SECONDS=150
+LOCAL_LLM_NUM_GPU=-1
+ENABLE_GEMINI_FALLBACK=false
+MAX_CONTEXT_CHARACTERS=2200
+RETRIEVAL_TOP_K=3
+```
+
+### Troubleshooting
+
+- `HTTP 404 model not found`:
+	- Ensure `LOCAL_LLM_MODEL` exactly matches an installed tag from `ollama list`.
+	- Example mismatch: configured `qwen3.5:4b` while only `gemma4:e4b` is installed.
+
+- Slow answers / timeout:
+	- Lower `LOCAL_LLM_NUM_PREDICT`.
+	- Reduce `MAX_CONTEXT_CHARACTERS`.
+	- Keep `LOCAL_LLM_STREAM=true`.
+
+- Empty local responses:
+	- Check logs for `done_reason`, `eval_count`, `prompt_eval_count`, and local payload preview.
+	- Confirm model is valid and loaded with `LOCAL_LLM_VALIDATE_MODEL=true`.
+
 ## Notes
 
 - FAISS is currently the primary vector backend and is intended for single-instance use.
 - The app is optimized for grounded answers; low-confidence queries should refuse rather than hallucinate.
 - Duplicate PDFs are skipped based on content hash.
+- Query logs include stage timing (`retrieval_ms`, `prompt_build_ms`, `generation_ms`) for latency tuning.
 
 ## License
 
