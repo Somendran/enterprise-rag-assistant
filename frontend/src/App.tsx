@@ -12,6 +12,7 @@ import './App.css';
 
 // API Configuration
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const RESET_REQUEST_TIMEOUT_MS = 15000;
 const STARTER_PROMPTS = [
   'Summarize leave policy changes this year',
   'What are the vendor onboarding steps?',
@@ -362,13 +363,21 @@ function App() {
     setUploadStatus('Resetting knowledge base...');
 
     try {
-      const response = await axios.post(`${API_BASE}/knowledge-base/reset`);
+      const response = await axios.post(
+        `${API_BASE}/knowledge-base/reset`,
+        undefined,
+        { timeout: RESET_REQUEST_TIMEOUT_MS }
+      );
       const deleted = Number(response.data?.uploads_deleted ?? 0);
       setMessages([]);
       setKnowledgeFiles([]);
       setUploadStatus(`Knowledge base reset complete. Deleted ${deleted} uploaded file(s).`);
     } catch (error) {
       console.error('Reset error:', error);
+      if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
+        setUploadStatus('Reset request timed out. Check backend status and try again.');
+        return;
+      }
       if (axios.isAxiosError(error) && error.response?.data?.detail) {
         setUploadStatus(String(error.response.data.detail));
       } else {
@@ -389,7 +398,7 @@ function App() {
     <div className="ui-shell">
       <aside className="kb-pane">
         <div className="brand-block">
-          <h1>Enterprise RAG</h1>
+          <h1>RAGiT</h1>
           <p>Grounded knowledge workspace</p>
         </div>
 

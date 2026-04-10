@@ -122,6 +122,7 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
     total_chunks_indexed = 0
 
     for file in files:
+        file_start = time.perf_counter()
         if not file.filename or not file.filename.lower().endswith(".pdf"):
             results.append(
                 UploadItemResult(
@@ -177,6 +178,7 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
         try:
             chunks = []
             vision_calls_used = 0
+            chunking_start = time.perf_counter()
 
             if settings.enable_docling:
                 try:
@@ -204,10 +206,14 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
                 documents = load_pdf(file_path)
                 chunks = split_documents(documents)
 
+            chunking_elapsed = time.perf_counter() - chunking_start
+
             if not chunks:
                 raise ValueError("Document contains no parseable text.")
 
+            index_start = time.perf_counter()
             add_documents(chunks)
+            index_elapsed = time.perf_counter() - index_start
             if file_hash:
                 register_indexed_document(
                     file_hash=file_hash,
@@ -217,6 +223,15 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
                 )
 
             total_chunks_indexed += len(chunks)
+            total_file_elapsed = time.perf_counter() - file_start
+            logger.info(
+                "File indexing complete | file=%s chunks=%d chunking_time_s=%.3f embed_faiss_time_s=%.3f total_time_s=%.3f",
+                file.filename,
+                len(chunks),
+                chunking_elapsed,
+                index_elapsed,
+                total_file_elapsed,
+            )
             results.append(
                 UploadItemResult(
                     filename=file.filename,

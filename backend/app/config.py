@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # Model identifiers
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_device: str = "auto"
     llm_model: str = "gemini-2.5-flash"
     # Keep Gemini fallback disabled by default for strict local operation.
     enable_gemini_fallback: bool = False

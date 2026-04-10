@@ -20,6 +20,35 @@ logger = get_logger(__name__)
 DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
+def _torch_cuda_available() -> bool:
+    try:
+        import torch  # type: ignore
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _resolve_embedding_device() -> str:
+    requested = (settings.embedding_device or "auto").strip().lower()
+    if requested not in {"auto", "cpu", "cuda"}:
+        logger.warning("Unsupported EMBEDDING_DEVICE='%s'. Falling back to auto.", requested)
+        requested = "auto"
+
+    if requested == "cpu":
+        return "cpu"
+
+    cuda_available = _torch_cuda_available()
+    if requested == "cuda":
+        if cuda_available:
+            return "cuda"
+        logger.warning("EMBEDDING_DEVICE=cuda requested but CUDA is unavailable. Falling back to CPU.")
+        return "cpu"
+
+    # auto mode
+    return "cuda" if cuda_available else "cpu"
+
+
 class LocalHuggingFaceEmbeddings(Embeddings):
     """
     Wrap HuggingFaceEmbeddings with a stable local model.
@@ -28,12 +57,13 @@ class LocalHuggingFaceEmbeddings(Embeddings):
     the rest of the RAG pipeline.
     """
 
-    def __init__(self, model_name: str, batch_size: int = 32):
+    def __init__(self, model_name: str, batch_size: int = 32, device: str = "cpu"):
         self.model_name = model_name
         self.batch_size = max(1, batch_size)
+        self.device = device
         self._client = HuggingFaceEmbeddings(
             model_name=self.model_name,
-            model_kwargs={"device": "cpu"},
+            model_kwargs={"device": self.device},
             encode_kwargs={
                 "batch_size": self.batch_size,
                 "normalize_embeddings": True,
@@ -69,7 +99,7 @@ def is_local_embedding_backend(embeddings: Embeddings) -> bool:
 def embedding_backend_name(embeddings: Embeddings) -> str:
     """Best-effort human-readable backend name for diagnostics."""
     if is_local_embedding_backend(embeddings):
-        return "local_sentence_transformers"
+        return f"local_sentence_transformers[{getattr(embeddings, 'device', 'unknown')}]"
     return type(embeddings).__name__
 
 def get_embedding_model() -> Embeddings:
@@ -97,7 +127,10 @@ def _get_cached_embedding_model() -> Embeddings:
         "Initialising local Hugging Face embeddings with model: %s",
         model_name,
     )
+    device = _resolve_embedding_device()
+    logger.info("Embedding device resolved to: %s", device)
     return LocalHuggingFaceEmbeddings(
         model_name=model_name,
         batch_size=settings.embedding_batch_size,
+        device=device,
     )

@@ -297,6 +297,7 @@ def add_documents(chunks: List[Document]) -> FAISS:
     global _store
 
     with _write_lock:
+        add_documents_start = time.perf_counter()
         embeddings = get_embedding_model()
         index_path = _index_path()
         batch_size = max(1, settings.embedding_batch_size)
@@ -388,6 +389,7 @@ def add_documents(chunks: List[Document]) -> FAISS:
             (embedding_elapsed / total_batches) if total_batches else 0.0,
         )
 
+        faiss_start = time.perf_counter()
         text_embeddings = list(zip(texts, vectors))
         new_dim = len(vectors[0]) if vectors else None
 
@@ -426,7 +428,14 @@ def add_documents(chunks: List[Document]) -> FAISS:
         # Persist after every successful write
         _store.save_local(index_path)
         _write_index_meta(index_path, _get_index_dimension(_store))
-        logger.info(f"FAISS index saved to: {index_path}")
+        faiss_elapsed = time.perf_counter() - faiss_start
+        total_elapsed = time.perf_counter() - add_documents_start
+        logger.info(
+            "FAISS index saved | path=%s faiss_time_s=%.3f total_add_documents_time_s=%.3f",
+            index_path,
+            faiss_elapsed,
+            total_elapsed,
+        )
 
         return _store
 
