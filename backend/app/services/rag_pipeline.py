@@ -15,10 +15,11 @@ import time
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, List
+from typing import Any, Callable, Dict, List, Optional
 
 from app.services.retriever import retrieve_relevant_chunks_with_diagnostics, RetrievedChunk
 from app.services.llm_service import generate_answer
+from app.services.embedding_service import get_embedding_model
 from app.services.openai_llm_service import (
     generate_response as generate_openai_response,
     stream_response as stream_openai_response,
@@ -37,6 +38,15 @@ from app.utils.logger import get_logger
 from app.utils.query_normalization import normalize_query
 
 logger = get_logger(__name__)
+
+FILLER_PREFIXES = (
+    "based on the provided",
+    "according to the provided",
+    "from the provided",
+    "it appears",
+    "in summary",
+    "overall",
+)
 
 
 @dataclass
@@ -372,6 +382,192 @@ def _append_confidence_explanation(
     return (answer + explanation).strip()
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _source_sort_key(chunk: RetrievedChunk) -> tuple[str, int]:
+    return (
+        str(chunk.document.metadata.get("source", "unknown")),
+        int(chunk.document.metadata.get("page", 0) or 0),
+    )
+
+
+def _ordered_source_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    return sorted(chunks, key=_source_sort_key)
+
+
+def _source_tag_for_index(idx: int) -> str:
+    return f"Source {idx + 1}"
+
+
+def extract_claims(answer: str) -> List[str]:
+    """Extract lightweight atomic claims from answer text without extra LLM calls."""
+    if not answer or not answer.strip():
+        return []
+
+    text = re.sub(r"```[\s\S]*?```", " ", answer)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    claim_candidates: list[str] = []
+    for line in lines:
+        lowered = line.lower().strip(":")
+        if lowered in {
+            "short answer",
+            "key facts",
+            "missing information",
+            "optional notes",
+            "confidence explanation",
+        }:
+            continue
+        if lowered.startswith("confidence:") or lowered.startswith("reason:"):
+            continue
+
+        normalized = re.sub(r"^[-*]\s+", "", line)
+        sentences = re.split(r"(?<=[.!?])\s+", normalized)
+        claim_candidates.extend(s.strip() for s in sentences if s.strip())
+
+    claims: list[str] = []
+    seen: set[str] = set()
+    for raw_claim in claim_candidates:
+        claim = re.sub(r"\s+", " ", raw_claim).strip()
+        if len(claim) < 20:
+            continue
+        lowered = claim.lower()
+        if lowered.startswith(FILLER_PREFIXES):
+            continue
+        if lowered in {"i don't know", "insufficient information"}:
+            continue
+
+        key = re.sub(r"\s+", " ", lowered)
+        if key in seen:
+            continue
+        seen.add(key)
+        claims.append(claim)
+
+    return claims
+
+
+def _dot_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b:
+        return 0.0
+    size = min(len(a), len(b))
+    return float(sum(a[i] * b[i] for i in range(size)))
+
+
+def verify_claims(claims: List[str], context_chunks: List[RetrievedChunk]) -> List[Dict[str, Any]]:
+    """Verify claims by embedding-similarity against retrieved context chunks."""
+    if not claims or not context_chunks:
+        return []
+
+    chunk_texts: list[str] = []
+    chunk_ids: list[str] = []
+    for idx, chunk in enumerate(context_chunks):
+        text = re.sub(r"\s+", " ", chunk.document.page_content).strip()
+        chunk_texts.append(text[:800])
+        chunk_ids.append(_source_tag_for_index(idx))
+
+    embedding_model = get_embedding_model()
+    batched_inputs = claims + chunk_texts
+    vectors = embedding_model.embed_documents(batched_inputs)
+    claim_vectors = vectors[: len(claims)]
+    chunk_vectors = vectors[len(claims):]
+
+    threshold = float(settings.verification_similarity_threshold)
+    verified: list[dict[str, Any]] = []
+    for claim, claim_vec in zip(claims, claim_vectors):
+        best_idx = -1
+        best_score = -1.0
+        for idx, chunk_vec in enumerate(chunk_vectors):
+            score = _dot_similarity(claim_vec, chunk_vec)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        matched_chunk_id: Optional[str] = chunk_ids[best_idx] if best_idx >= 0 else None
+        verified.append(
+            {
+                "claim": claim,
+                "supported": best_score >= threshold,
+                "score": round(_clamp01(best_score), 4),
+                "matched_chunk_id": matched_chunk_id,
+            }
+        )
+
+    return verified
+
+
+def _extract_source_citations(answer: str) -> list[str]:
+    matches = re.findall(r"\[\s*Source\s+(\d+)\s*\]", answer or "", flags=re.IGNORECASE)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw in matches:
+        tag = f"Source {int(raw)}"
+        if tag in seen:
+            continue
+        seen.add(tag)
+        deduped.append(tag)
+    return deduped
+
+
+def validate_citations(
+    answer: str,
+    verified_claims: List[Dict[str, Any]],
+    valid_chunk_ids: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    """Validate citation tags and compute supported-claim coverage."""
+    citations = _extract_source_citations(answer)
+    claims_total = len(verified_claims)
+    claims_supported = sum(1 for item in verified_claims if bool(item.get("supported")))
+    coverage = float(claims_supported / claims_total) if claims_total else 0.0
+
+    if valid_chunk_ids is None:
+        valid_chunk_ids = {str(item.get("matched_chunk_id")) for item in verified_claims if item.get("matched_chunk_id")}
+
+    supported_citation_ids = {
+        str(item.get("matched_chunk_id"))
+        for item in verified_claims
+        if bool(item.get("supported")) and item.get("matched_chunk_id")
+    }
+
+    orphan_or_invalid = [citation for citation in citations if citation not in valid_chunk_ids]
+    no_support = [citation for citation in citations if citation in valid_chunk_ids and citation not in supported_citation_ids]
+    invalid_citations = sorted(set(orphan_or_invalid + no_support))
+
+    unsupported_claims = [
+        str(item.get("claim", "")).strip()
+        for item in verified_claims
+        if (not bool(item.get("supported"))) and _extract_source_citations(str(item.get("claim", "")))
+    ]
+
+    return {
+        "invalid_citations": invalid_citations,
+        "unsupported_claims": unsupported_claims,
+        "coverage": round(_clamp01(coverage), 4),
+    }
+
+
+def recompute_confidence(
+    claim_support_ratio: float,
+    citation_coverage: float,
+    retrieval_score: float,
+) -> tuple[float, str]:
+    """Blend verification signals with retrieval quality into final confidence."""
+    blended = (
+        0.5 * _clamp01(claim_support_ratio)
+        + 0.3 * _clamp01(citation_coverage)
+        + 0.2 * _clamp01(retrieval_score)
+    )
+    score = round(_clamp01(blended), 4)
+    return score, _confidence_level(score)
+
+
+def _append_verification_warning(answer: str) -> str:
+    warning = "\n\nSome parts of this answer may not be fully supported by the retrieved documents."
+    if warning.strip() in answer:
+        return answer
+    return (answer + warning).strip()
+
+
 def run_rag_pipeline(
     question: str,
     stream_callback: Callable[[str], None] | None = None,
@@ -489,13 +685,24 @@ def run_rag_pipeline(
     )
 
     # ── Step 4: Call centralized generation flow ─────────────────────────────
-    confidence_score = sum(item.final_score for item in chunks) / len(chunks)
+    retrieval_score = sum(item.final_score for item in chunks) / len(chunks)
+    confidence_score = retrieval_score
     confidence_level = _confidence_level(confidence_score)
 
     generation_ms = 0.0
+    verification_ms = 0.0
     llm_retry_count = 0
     llm_retry_reason = ""
     low_confidence_fallback_used = False
+    verification_enabled = bool(settings.enable_verification)
+    verification_applied = False
+    verification_skipped_reason = ""
+    verification_failed = False
+    claims_total = 0
+    claims_verified = 0
+    citation_coverage = 0.0
+    invalid_citations: list[str] = []
+    unsupported_claims_count = 0
     top_chunk_score = max((item.final_score for item in chunks), default=0.0)
 
     hard_refusal = (
@@ -561,6 +768,65 @@ def run_rag_pipeline(
         generation_ms = (time.perf_counter() - generation_start) * 1000.0
         answer = _clean_answer_text(answer)
         answer = _dedupe_answer_bullets(answer)
+
+        should_verify = (
+            verification_enabled
+            and (not debug.fast_mode_applied)
+            and len(chunks_for_generation) >= 2
+            and len(answer.strip()) >= int(settings.verification_min_answer_chars)
+        )
+
+        if should_verify:
+            verify_start = time.perf_counter()
+            try:
+                ordered_chunks = _ordered_source_chunks(chunks_for_generation)
+                claims = extract_claims(answer)
+                claims_total = len(claims)
+                valid_chunk_ids = {
+                    _source_tag_for_index(idx) for idx in range(len(ordered_chunks))
+                }
+                verified_claims = verify_claims(claims, ordered_chunks)
+                claims_verified = sum(1 for item in verified_claims if bool(item.get("supported")))
+                claim_support_ratio = (
+                    float(claims_verified / claims_total) if claims_total else 0.0
+                )
+
+                citation_report = validate_citations(
+                    answer=answer,
+                    verified_claims=verified_claims,
+                    valid_chunk_ids=valid_chunk_ids,
+                )
+                citation_coverage = float(citation_report.get("coverage", 0.0))
+                invalid_citations = [str(c) for c in citation_report.get("invalid_citations", [])]
+                unsupported_claims_count = len(citation_report.get("unsupported_claims", []))
+
+                confidence_score, confidence_level = recompute_confidence(
+                    claim_support_ratio=claim_support_ratio,
+                    citation_coverage=citation_coverage,
+                    retrieval_score=retrieval_score,
+                )
+                verification_applied = True
+
+                if claim_support_ratio < float(settings.verification_warning_support_threshold):
+                    answer = _append_verification_warning(answer)
+            except Exception as exc:
+                verification_failed = True
+                verification_skipped_reason = "verification_failed"
+                confidence_score = min(confidence_score, 0.2)
+                confidence_level = "low"
+                logger.warning("Verification layer failed; continuing without blocking response. error=%s", exc)
+            finally:
+                verification_ms = (time.perf_counter() - verify_start) * 1000.0
+        else:
+            if not verification_enabled:
+                verification_skipped_reason = "disabled"
+            elif debug.fast_mode_applied:
+                verification_skipped_reason = "fast_mode"
+            elif len(chunks_for_generation) < 2:
+                verification_skipped_reason = "insufficient_chunks"
+            else:
+                verification_skipped_reason = "answer_too_short"
+
         if confidence_score < float(settings.answer_low_confidence_threshold):
             low_confidence_fallback_used = True
             answer = _apply_low_confidence_disclaimer(answer)
@@ -602,6 +868,16 @@ def run_rag_pipeline(
         llm_retry_reason=llm_retry_reason,
         normalization_applied=normalization_applied,
         low_confidence_fallback_used=low_confidence_fallback_used,
+        verification_enabled=verification_enabled,
+        verification_applied=verification_applied,
+        verification_skipped_reason=verification_skipped_reason,
+        verification_failed=verification_failed,
+        verification_ms=round(verification_ms, 2),
+        claims_total=claims_total,
+        claims_verified=claims_verified,
+        citation_coverage=round(float(citation_coverage), 4),
+        invalid_citations=invalid_citations,
+        unsupported_claims=unsupported_claims_count,
     )
 
     logger.info(

@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     low_confidence_min_chunk_score: float = 0.18
     # Keep context compact for local generation latency.
     max_context_characters: int = 2200
+    # Lightweight post-generation verification controls.
+    enable_verification: bool = True
+    verification_similarity_threshold: float = 0.75
+    verification_min_answer_chars: int = 80
+    verification_warning_support_threshold: float = 0.50
 
     # ── Embedding ingestion throughput ───────────────────────────────────────
     # Number of chunks per embedding call during upload ingestion.

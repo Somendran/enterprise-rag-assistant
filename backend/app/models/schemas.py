@@ -94,6 +94,16 @@ class RetrievalDiagnostics(BaseModel):
     llm_retry_reason: str = Field(default="")
     normalization_applied: bool = Field(default=False)
     low_confidence_fallback_used: bool = Field(default=False)
+    verification_enabled: bool = Field(default=False)
+    verification_applied: bool = Field(default=False)
+    verification_skipped_reason: str = Field(default="")
+    verification_failed: bool = Field(default=False)
+    verification_ms: float = Field(default=0.0)
+    claims_total: int = Field(default=0)
+    claims_verified: int = Field(default=0)
+    citation_coverage: float = Field(default=0.0)
+    invalid_citations: List[str] = Field(default_factory=list)
+    unsupported_claims: int = Field(default=0)
 
 
 class QueryResponse(BaseModel):
