@@ -23,10 +23,12 @@ from app.services.query_cache import clear_query_cache
 from app.services.vector_store import (
     add_documents,
     is_document_indexed,
+    list_indexed_documents,
     register_indexed_document,
     reset_vector_store,
 )
 from app.models.schemas import (
+    KnowledgeBaseFilesResponse,
     UploadBatchResponse,
     UploadItemResult,
     ResetKnowledgeBaseResponse,
@@ -37,6 +39,18 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+@router.get(
+    "/knowledge-base/files",
+    response_model=KnowledgeBaseFilesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List indexed files",
+    description="Returns persisted indexed document metadata for UI hydration on reload.",
+)
+async def list_knowledge_base_files() -> KnowledgeBaseFilesResponse:
+    files = list_indexed_documents()
+    return KnowledgeBaseFilesResponse(files=files)
 
 
 @router.post(

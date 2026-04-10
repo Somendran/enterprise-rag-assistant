@@ -213,6 +213,28 @@ def register_indexed_document(
     _write_doc_registry(index_path, registry)
 
 
+def list_indexed_documents() -> list[dict[str, Any]]:
+    """Return persisted indexed document metadata for UI display."""
+    index_path = _index_path()
+    registry = _read_doc_registry(index_path)
+
+    items: list[dict[str, Any]] = []
+    for file_hash, meta in registry.items():
+        if not isinstance(meta, dict):
+            continue
+        items.append(
+            {
+                "file_hash": file_hash,
+                "filename": str(meta.get("filename", "unknown")),
+                "chunk_count": int(meta.get("chunk_count", 0) or 0),
+                "indexed_at": int(meta.get("indexed_at", 0) or 0),
+            }
+        )
+
+    items.sort(key=lambda x: (x["filename"].lower(), -x["indexed_at"]))
+    return items
+
+
 def get_or_create_store() -> FAISS:
     """
     Return the active FAISS vector store.

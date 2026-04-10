@@ -269,11 +269,14 @@ def _extract_sources(chunks: list[RetrievedChunk]) -> List[SourceReference]:
         key = (source, page)
         if key not in seen:
             seen.add(key)
+            snippet_raw = re.sub(r"\s+", " ", str(chunk.document.page_content or "")).strip()
+            snippet = snippet_raw[:220].strip()
             sources.append(
                 SourceReference(
                     document=source,
                     page=page,
                     relevance_score=round(float(chunk.final_score), 4),
+                    snippet=snippet or None,
                 )
             )
     return sources

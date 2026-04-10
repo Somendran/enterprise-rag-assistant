@@ -49,6 +49,20 @@ class ResetKnowledgeBaseResponse(BaseModel):
     uploads_deleted: int = Field(..., description="Number of uploaded files deleted.")
 
 
+class KnowledgeBaseFileItem(BaseModel):
+    """Indexed document metadata used by sidebar file list."""
+
+    filename: str = Field(..., description="Indexed document filename.")
+    chunk_count: int = Field(..., description="Number of indexed chunks for the document.")
+    indexed_at: int = Field(..., description="Unix timestamp when document was indexed.")
+
+
+class KnowledgeBaseFilesResponse(BaseModel):
+    """List of indexed files currently present in the registry."""
+
+    files: List[KnowledgeBaseFileItem] = Field(default_factory=list)
+
+
 # ── /query ───────────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
@@ -71,6 +85,10 @@ class SourceReference(BaseModel):
     relevance_score: Optional[float] = Field(
         default=None,
         description="Normalized relevance confidence in range [0, 1].",
+    )
+    snippet: Optional[str] = Field(
+        default=None,
+        description="Short excerpt from the retrieved chunk for quick context preview.",
     )
 
 
