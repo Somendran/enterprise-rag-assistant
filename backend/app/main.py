@@ -1,14 +1,4 @@
-"""
-main.py
-───────
-FastAPI application entry point.
-
-Responsibilities:
-- Create and configure the FastAPI app.
-- Register all API routers.
-- Mount startup logic (e.g. pre-loading the FAISS index from disk).
-- Provide a health-check endpoint.
-"""
+"""FastAPI application entry point."""
 
 from contextlib import asynccontextmanager
 
@@ -16,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import upload, query
+from app.config import settings
 from app.services.vector_store import load_store
 from app.utils.logger import get_logger
 
@@ -50,22 +41,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
-# For backend-only usage this doesn't matter much, but it's good practice
-# to configure it explicitly so adding a frontend later is painless.
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Restrict to specific origins in production
+    allow_origins=settings.cors_origins,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
-# ── Routers ───────────────────────────────────────────────────────────────────
+# Routers
 app.include_router(upload.router, tags=["Ingestion"])
 app.include_router(query.router, tags=["Retrieval & Generation"])
 
 
-# ── Health check ──────────────────────────────────────────────────────────────
+# Health check
 @app.get("/health", tags=["Ops"], summary="Health check")
 async def health_check():
     """Returns 200 if the service is running."""

@@ -1,0 +1,37 @@
+[
+  {
+    "id": "leave-policy-summary",
+    "question": "Summarize the leave policy.",
+    "expected_sources": [],
+    "expected_keywords": ["leave"],
+    "notes": "Replace expected_sources with known PDF filenames/pages after indexing your sample HR policy PDF."
+  },
+  {
+    "id": "vendor-onboarding-steps",
+    "question": "What are the vendor onboarding steps?",
+    "expected_sources": [],
+    "expected_keywords": ["vendor", "onboarding"],
+    "notes": "Use this when your knowledge base includes procurement or vendor onboarding material."
+  },
+  {
+    "id": "sla-escalation-path",
+    "question": "Where is the SLA escalation path documented?",
+    "expected_sources": [],
+    "expected_keywords": ["sla", "escalation"],
+    "notes": "Add an expected source page once an SLA or support-process PDF is indexed."
+  },
+  {
+    "id": "benefits-eligibility",
+    "question": "Who is eligible for employee benefits?",
+    "expected_sources": [],
+    "expected_keywords": ["benefits", "eligible"],
+    "notes": "Useful for checking policy retrieval over benefits documents."
+  },
+  {
+    "id": "security-policy",
+    "question": "What does the security policy require for access control?",
+    "expected_sources": [],
+    "expected_keywords": ["security", "access"],
+    "notes": "Useful for checking source grounding on security or compliance documents."
+  }
+]

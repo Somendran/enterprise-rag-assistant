@@ -1,18 +1,21 @@
-"""
-config.py
-─────────
-Centralised configuration using pydantic-settings.
-All values are read from environment variables (or .env file).
-Importing `settings` anywhere in the app gives you the same singleton.
-"""
+"""Centralized configuration using pydantic-settings."""
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from pathlib import Path
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # ── Google Gemini ────────────────────────────────────────────────────────
-    google_api_key: str
+    # Google Gemini
+    app_env: str = "development"
+    google_api_key: str = ""
+
+    # API / browser access controls. Leave app_api_key empty for local-only dev;
+    # set it in production to require X-API-Key or Authorization: Bearer <key>.
+    app_api_key: str = ""
+    allowed_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Model identifiers
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -42,7 +45,7 @@ class Settings(BaseSettings):
     # -1 lets Ollama auto-detect and use available GPU resources.
     local_llm_num_gpu: int = -1
 
-    # ── OpenAI generation (optional primary path) ───────────────────────────
+    # OpenAI generation (optional primary path)
     use_openai: bool = False
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
@@ -51,14 +54,15 @@ class Settings(BaseSettings):
     openai_timeout_seconds: int = 30
     openai_network_retry_attempts: int = 1
 
-    # ── Storage paths ────────────────────────────────────────────────────────
+    # Storage paths
     # Where uploaded PDFs are saved on disk
     upload_dir: str = "data/uploads"
+    max_upload_size_mb: int = 25
 
     # Where the FAISS index is persisted between restarts
     faiss_index_path: str = "data/faiss_index"
 
-    # ── Retrieval ────────────────────────────────────────────────────────────
+    # Retrieval
     # Final number of chunks passed to the LLM after reranking.
     retrieval_top_n: int = 5
     # How many candidates to gather before neural reranking.
@@ -108,7 +112,7 @@ class Settings(BaseSettings):
     verification_min_answer_chars: int = 80
     verification_warning_support_threshold: float = 0.50
 
-    # ── Embedding ingestion throughput ───────────────────────────────────────
+    # Embedding ingestion throughput
     # Number of chunks per embedding call during upload ingestion.
     # Tuned for local sentence-transformers throughput on CPU.
     embedding_batch_size: int = 64
@@ -116,11 +120,11 @@ class Settings(BaseSettings):
     # thread-safe for concurrent embed_documents calls.
     embedding_parallel_workers: int = 1
 
-    # ── Text splitting ───────────────────────────────────────────────────────
+    # Text splitting
     chunk_size: int = 700
     chunk_overlap: int = 100
 
-    # ── Retrieval behavior toggles ───────────────────────────────────────────
+    # Retrieval behavior toggles
     enable_retrieval_fallback: bool = True
     enable_retrieval_diagnostics: bool = True
     enable_neural_reranker: bool = True
@@ -140,12 +144,34 @@ class Settings(BaseSettings):
     vector_weight: float = 0.60
     lexical_weight: float = 0.15
 
-    # ── Query caching ─────────────────────────────────────────────────────────
+    # Query caching
     enable_query_cache: bool = True
     query_cache_ttl_seconds: int = 600
 
+    @property
+    def cors_origins(self) -> list[str]:
+        origins = [
+            item.strip()
+            for item in self.allowed_cors_origins.split(",")
+            if item.strip()
+        ]
+        return origins or ["http://localhost:5173"]
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        return max(1, int(self.max_upload_size_mb)) * 1024 * 1024
+
+    @model_validator(mode="after")
+    def require_api_key_in_production(self) -> "Settings":
+        if self.app_env.strip().lower() == "production" and not self.app_api_key.strip():
+            raise ValueError("APP_API_KEY is required when APP_ENV=production.")
+        return self
+
     # Tells pydantic-settings to load a .env file automatically
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parents[1] / ".env"),
+        env_file_encoding="utf-8",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -158,5 +184,5 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# Convenience alias — just `from app.config import settings` anywhere
+# Convenience alias: just `from app.config import settings` anywhere.
 settings = get_settings()

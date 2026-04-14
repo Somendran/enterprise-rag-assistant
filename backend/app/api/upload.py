@@ -1,11 +1,4 @@
-"""
-upload.py
-─────────
-POST /upload
-
-Accepts a PDF file, runs the full ingestion pipeline
-(load → split → embed → store), and returns the number of chunks indexed.
-"""
+"""Upload and knowledge-base management endpoints."""
 
 import os
 import time
@@ -13,9 +6,11 @@ import shutil
 import hashlib
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 
-from app.services.document_loader import load_pdf, compute_file_hash
+from app.api.security import require_api_key
+from app.api.upload_validation import safe_pdf_filename, validate_pdf_upload
+from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents, chunk_structured_blocks
 from app.services.ingestion.doc_parser import parse_document
 from app.services.ingestion.vision_enricher import enrich_blocks_with_vision, get_last_vision_calls_used
@@ -38,7 +33,7 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 @router.get(
@@ -123,7 +118,8 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
 
     for file in files:
         file_start = time.perf_counter()
-        if not file.filename or not file.filename.lower().endswith(".pdf"):
+        safe_filename = safe_pdf_filename(file.filename)
+        if safe_filename is None:
             results.append(
                 UploadItemResult(
                     filename=file.filename or "unknown",
@@ -136,9 +132,33 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
 
         logger.info("Upload received: '%s'", file.filename)
 
-        file_path = upload_dir / file.filename
+        content = b""
+        file_hash = ""
+        document_id = ""
+        file_path: Path | None = None
         try:
             content = await file.read()
+            validation_error = validate_pdf_upload(
+                filename=file.filename,
+                content_type=file.content_type,
+                content=content,
+                max_upload_size_bytes=settings.max_upload_size_bytes,
+                max_upload_size_mb=settings.max_upload_size_mb,
+            )
+            if validation_error:
+                results.append(
+                    UploadItemResult(
+                        filename=file.filename or "unknown",
+                        chunks_indexed=0,
+                        status="failed",
+                        message=validation_error,
+                    )
+                )
+                continue
+
+            file_hash = hashlib.sha256(content).hexdigest()
+            document_id = hashlib.sha1(f"{safe_filename}:{file_hash}".encode("utf-8")).hexdigest()[:16]
+            file_path = upload_dir / f"{file_hash[:12]}_{safe_filename}"
             with open(file_path, "wb") as f:
                 f.write(content)
         except Exception as e:
@@ -153,21 +173,13 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
             )
             continue
 
-        file_hash = ""
-        document_id = ""
-        try:
-            file_hash = compute_file_hash(file_path)
-            document_id = hashlib.sha1(f"{file.filename}:{file_hash}".encode("utf-8")).hexdigest()[:16]
-        except Exception as e:
-            logger.warning("Could not compute hash for '%s': %s", file.filename, e)
-
         if file_hash and is_document_indexed(file_hash):
             logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
-            if file_path.exists():
+            if file_path is not None and file_path.exists():
                 os.remove(file_path)
             results.append(
                 UploadItemResult(
-                    filename=file.filename,
+                    filename=safe_filename,
                     chunks_indexed=0,
                     status="duplicate",
                     message="Duplicate document detected. Existing index entry was reused.",
@@ -211,13 +223,16 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
             if not chunks:
                 raise ValueError("Document contains no parseable text.")
 
+            for chunk in chunks:
+                chunk.metadata["source"] = safe_filename
+
             index_start = time.perf_counter()
             add_documents(chunks)
             index_elapsed = time.perf_counter() - index_start
             if file_hash:
                 register_indexed_document(
                     file_hash=file_hash,
-                    filename=file.filename,
+                    filename=safe_filename,
                     chunk_count=len(chunks),
                     document_id=document_id,
                 )
@@ -234,7 +249,7 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
             )
             results.append(
                 UploadItemResult(
-                    filename=file.filename,
+                    filename=safe_filename,
                     chunks_indexed=len(chunks),
                     status="success",
                     message="Document ingested successfully.",
@@ -242,11 +257,11 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
             )
         except Exception as e:
             logger.error("Ingestion failed for '%s': %s", file.filename, e)
-            if file_path.exists():
+            if file_path is not None and file_path.exists():
                 os.remove(file_path)
             results.append(
                 UploadItemResult(
-                    filename=file.filename,
+                    filename=safe_filename,
                     chunks_indexed=0,
                     status="failed",
                     message=f"Document ingestion failed: {e}",

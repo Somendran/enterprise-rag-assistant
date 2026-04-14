@@ -1,4 +1,4 @@
-# ── Virtual environments ──────────────────────────────
+# Virtual environments
 venv/
 .venv/
 rag/
@@ -8,36 +8,40 @@ ENV/
 virtualenv/
 .virtualenv/
 
-# ── Environment variables ─────────────────────────────
+# Environment variables
 .env
 .env.*
 *.env
 !.env.example
 
-# ── Python cache ──────────────────────────────────────
+# Python cache
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
 
-# ── FAISS index (regenerated from uploads) ────────────
+# FAISS index (regenerated from uploads)
 data/faiss_index/
 backend/data/faiss_index/
 
-# ── Uploaded PDFs ─────────────────────────────────────
+# Uploaded PDFs
 data/uploads/
 backend/data/uploads/
 
-# ── IDE / editor ──────────────────────────────────────
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# ── OS files ──────────────────────────────────────────
+# OS files
 .DS_Store
 Thumbs.db
 
-# ── Logs ─────────────────────────────────────────────
+# Logs
 *.log

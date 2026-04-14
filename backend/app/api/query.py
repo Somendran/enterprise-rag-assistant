@@ -1,19 +1,13 @@
-"""
-query.py
-────────
-POST /query
-
-Accepts a user question, runs the RAG pipeline, and returns a structured
-response containing the LLM-generated answer and source references.
-"""
+"""Query endpoints for standard and streaming RAG responses."""
 
 import time
 import json
 import queue
 import threading
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
+from app.api.security import require_api_key
 from app.services.rag_pipeline import run_rag_pipeline
 from app.models.schemas import QueryRequest, QueryResponse
 from app.config import settings
@@ -21,7 +15,7 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 @router.post(

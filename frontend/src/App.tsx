@@ -12,6 +12,8 @@ import './App.css';
 
 // API Configuration
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_KEY = import.meta.env.VITE_API_KEY || '';
+const API_HEADERS: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
 const RESET_REQUEST_TIMEOUT_MS = 15000;
 const STARTER_PROMPTS = [
   'Summarize leave policy changes this year',
@@ -68,6 +70,31 @@ interface Message {
   confidence_score?: number | null;
   confidence_level?: 'high' | 'medium' | 'low' | null;
   diagnostics?: RetrievalDiagnostics | null;
+}
+
+interface StreamDonePayload {
+  answer?: string;
+  sources?: Source[];
+  confidence_score?: number | null;
+  confidence_level?: Message['confidence_level'];
+  diagnostics?: RetrievalDiagnostics | null;
+}
+
+type StreamEventPayload = StreamDonePayload & {
+  text?: string;
+  detail?: string;
+};
+
+function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    if (error.response?.status === 401) {
+      return 'API key missing or invalid. Check VITE_API_KEY and backend APP_API_KEY.';
+    }
+    if (error.response?.data?.detail) {
+      return String(error.response.data.detail);
+    }
+  }
+  return fallback;
 }
 
 function mergeKnowledgeFiles(current: KnowledgeFile[], incoming: KnowledgeFile[]): KnowledgeFile[] {
@@ -154,7 +181,10 @@ function App() {
   useEffect(() => {
     const loadIndexedFiles = async () => {
       try {
-        const response = await axios.get<KnowledgeBaseFilesResponse>(`${API_BASE}/knowledge-base/files`);
+        const response = await axios.get<KnowledgeBaseFilesResponse>(
+          `${API_BASE}/knowledge-base/files`,
+          { headers: API_HEADERS }
+        );
         const files = (response.data?.files || []).map((item) => ({
           filename: item.filename,
           chunks: Number(item.chunk_count || 0),
@@ -187,6 +217,7 @@ function App() {
     try {
       const response = await axios.post<UploadBatchResponse>(`${API_BASE}/upload`, formData, {
         headers: {
+          ...API_HEADERS,
           'Content-Type': 'multipart/form-data',
         },
       });
@@ -209,11 +240,7 @@ function App() {
       }
     } catch (error) {
       console.error("Upload error:", error);
-      if (axios.isAxiosError(error) && error.response?.data?.detail) {
-        setUploadStatus(String(error.response.data.detail));
-      } else {
-        setUploadStatus("Failed to upload files. Is the backend running?");
-      }
+      setUploadStatus(getApiErrorMessage(error, "Failed to upload files. Is the backend running?"));
     } finally {
       setIsUploading(false);
       // Reset input
@@ -274,9 +301,13 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/query/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...API_HEADERS },
         body: JSON.stringify({ question: userMsg.content }),
       });
+
+      if (response.status === 401) {
+        throw new Error('API key missing or invalid. Check VITE_API_KEY and backend APP_API_KEY.');
+      }
 
       if (!response.ok || !response.body) {
         throw new Error(`Streaming request failed with status ${response.status}`);
@@ -295,7 +326,7 @@ function App() {
         )));
       };
 
-      const applyDone = (payload: any) => {
+      const applyDone = (payload: StreamDonePayload) => {
         setMessages(prev => prev.map(msg => (
           msg.id === assistantId
             ? {
@@ -324,7 +355,7 @@ function App() {
           const dataLine = lines.find(line => line.startsWith('data:'))?.replace('data:', '').trim();
           if (!eventName || !dataLine) continue;
 
-          const payload = JSON.parse(dataLine);
+          const payload = JSON.parse(dataLine) as StreamEventPayload;
 
           if (eventName === 'chunk') {
             applyChunk(String(payload.text || ''));
@@ -337,8 +368,8 @@ function App() {
       }
     } catch (error) {
       console.error("Query error:", error);
-      const errorText = axios.isAxiosError(error) && error.response?.data?.detail
-        ? String(error.response.data.detail)
+      const errorText = error instanceof Error && error.message
+        ? error.message
         : "Sorry, there was an error processing your request. Please ensure the backend server is running.";
 
       setMessages(prev => prev.map(msg => (
@@ -366,7 +397,7 @@ function App() {
       const response = await axios.post(
         `${API_BASE}/knowledge-base/reset`,
         undefined,
-        { timeout: RESET_REQUEST_TIMEOUT_MS }
+        { timeout: RESET_REQUEST_TIMEOUT_MS, headers: API_HEADERS }
       );
       const deleted = Number(response.data?.uploads_deleted ?? 0);
       setMessages([]);
@@ -378,11 +409,7 @@ function App() {
         setUploadStatus('Reset request timed out. Check backend status and try again.');
         return;
       }
-      if (axios.isAxiosError(error) && error.response?.data?.detail) {
-        setUploadStatus(String(error.response.data.detail));
-      } else {
-        setUploadStatus('Failed to reset knowledge base.');
-      }
+      setUploadStatus(getApiErrorMessage(error, 'Failed to reset knowledge base.'));
     } finally {
       setIsResetting(false);
     }
@@ -428,7 +455,7 @@ function App() {
           />
 
           {uploadStatus && (
-            <div className={`status-note ${uploadStatus.includes('Failed') ? 'error' : 'success'}`}>
+            <div className={`status-note ${uploadStatus.includes('Failed') || uploadStatus.includes('API key') ? 'error' : 'success'}`}>
               {uploadStatus}
             </div>
           )}
