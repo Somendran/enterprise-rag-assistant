@@ -14,6 +14,7 @@ vector_store_stub.add_documents = lambda chunks: None
 vector_store_stub.is_document_indexed = lambda file_hash: False
 vector_store_stub.get_indexed_document = lambda file_hash: None
 vector_store_stub.list_indexed_documents = lambda: []
+vector_store_stub.list_document_chunks = lambda file_hash: []
 vector_store_stub.register_indexed_document = lambda **kwargs: None
 vector_store_stub.delete_indexed_document = lambda file_hash: {
     "file_hash": file_hash,
@@ -46,6 +47,23 @@ query_cache_stub = types.ModuleType("app.services.query_cache")
 query_cache_stub.clear_query_cache = lambda: None
 sys.modules.setdefault("app.services.query_cache", query_cache_stub)
 
+metadata_store_stub = types.ModuleType("app.services.metadata_store")
+metadata_store_stub.record_feedback = lambda **kwargs: {
+    "id": 1,
+    "created_at": 123,
+    "rating": kwargs.get("rating", ""),
+    "reason": kwargs.get("reason", ""),
+    "comment": kwargs.get("comment", ""),
+}
+metadata_store_stub.admin_summary = lambda: {
+    "document_count": 0,
+    "chunk_count": 0,
+    "feedback_count": 0,
+    "recent_feedback": [],
+    "metadata_db_path": "memory",
+}
+sys.modules.setdefault("app.services.metadata_store", metadata_store_stub)
+
 from app.api import query as query_module
 from app.api import upload as upload_module
 from app.config import Settings, settings
@@ -60,6 +78,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.original_get_indexed_document = upload_module.get_indexed_document
         self.original_delete_indexed_document = upload_module.delete_indexed_document
         self.original_delete_stored_upload = upload_module._delete_stored_upload
+        self.original_list_document_chunks = upload_module.list_document_chunks
 
     def tearDown(self):
         settings.app_api_key = self.original_api_key
@@ -67,6 +86,7 @@ class ApiIntegrationTests(unittest.TestCase):
         upload_module.get_indexed_document = self.original_get_indexed_document
         upload_module.delete_indexed_document = self.original_delete_indexed_document
         upload_module._delete_stored_upload = self.original_delete_stored_upload
+        upload_module.list_document_chunks = self.original_list_document_chunks
 
     def test_health_is_public(self):
         settings.app_api_key = "secret"
@@ -119,6 +139,52 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["file_hash"], "abc123")
         self.assertEqual(payload["chunks_deleted"], 3)
         self.assertTrue(payload["upload_deleted"])
+
+    def test_document_chunks_endpoint_returns_chunks(self):
+        settings.app_api_key = ""
+        upload_module.get_indexed_document = lambda file_hash: {
+            "file_hash": file_hash,
+            "filename": "handbook.pdf",
+        }
+        upload_module.list_document_chunks = lambda file_hash: [
+            {
+                "id": "chunk-1",
+                "content": "Leave policy text",
+                "page": 1,
+                "section": "Leave Policy",
+                "chunk_index": 0,
+                "metadata": {"source": "handbook.pdf"},
+            }
+        ]
+
+        response = self.client.get("/knowledge-base/files/abc123/chunks")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filename"], "handbook.pdf")
+        self.assertEqual(payload["chunks"][0]["section"], "Leave Policy")
+
+    def test_feedback_endpoint_records_feedback(self):
+        settings.app_api_key = ""
+        response = self.client.post(
+            "/feedback",
+            json={
+                "question": "What is the leave policy?",
+                "answer": "Employees are eligible for leave.",
+                "rating": "helpful",
+                "sources": [],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["rating"], "helpful")
+
+    def test_admin_overview_returns_summary(self):
+        settings.app_api_key = ""
+        response = self.client.get("/admin/overview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["document_count"], 0)
 
     def test_upload_rejects_bad_pdf_bytes_before_ingestion(self):
         settings.app_api_key = ""

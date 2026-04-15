@@ -11,9 +11,12 @@ Retrieval-Augmented Generation assistant for local knowledge bases. It lets you 
 - Local-first generation through Ollama, with optional OpenAI generation.
 - Server-Sent Events (SSE) streaming for chat responses.
 - Source references, confidence diagnostics, and optional post-generation verification.
-- React + Vite frontend for upload, chat, document management, reset, and retrieved-context review.
+- React + Vite frontend for upload, chat, document management, source chunk review, feedback, reset, and retrieved-context review.
 - Per-document delete/reindex operations for local FAISS maintenance.
+- SQLite metadata store for document registry, answer feedback, and admin/debug summaries.
+- Runtime model health checks for embeddings, Docling, reranker, Ollama, and OpenAI config.
 - RAG eval fixture and CI workflow for regression checks.
+- Local sample document generator for repeatable demos.
 - Optional API-key protection for backend routes.
 
 ## Architecture
@@ -38,6 +41,7 @@ graph TD
 - AI/models: Ollama, OpenAI, HuggingFace sentence-transformers
 - Frontend: React, TypeScript, Vite
 - Storage: local filesystem uploads and FAISS index persistence
+- Metadata: SQLite document registry and feedback store
 
 ## Backend Setup
 
@@ -70,6 +74,22 @@ npm run dev
 
 The frontend defaults to `http://localhost:8000` for the API and runs at `http://localhost:5173/`.
 
+## Convenience Scripts
+
+From the repository root:
+
+```powershell
+.\scripts\start_backend.ps1
+.\scripts\start_frontend.ps1
+.\scripts\run_checks.ps1
+```
+
+To export the FastAPI OpenAPI schema:
+
+```powershell
+.\scripts\export_openapi.ps1
+```
+
 ## API Key Setup
 
 For local development, `APP_API_KEY` can be left empty.
@@ -98,6 +118,7 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 | `APP_API_KEY` | Optional local API key; required in production. |
 | `ALLOWED_CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS. |
 | `MAX_UPLOAD_SIZE_MB` | Maximum PDF upload size handled by the app. |
+| `METADATA_DB_PATH` | SQLite store for document registry, feedback, and admin summaries. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
 | `EMBEDDING_DEVICE` | CPU-only for this project. Keep this as `cpu`. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |
@@ -114,11 +135,15 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 - `GET /health` - public health check.
 - `POST /upload` - ingest one or more PDF documents.
 - `GET /knowledge-base/files` - list indexed document metadata.
+- `GET /knowledge-base/files/{file_hash}/chunks` - inspect stored chunks for a document.
 - `DELETE /knowledge-base/files/{file_hash}` - remove one document from uploads, registry, and FAISS.
 - `POST /knowledge-base/files/{file_hash}/reindex` - rebuild chunks/vectors for one stored PDF.
 - `POST /knowledge-base/reset` - clear uploads and FAISS artifacts.
 - `POST /query` - run a non-streaming RAG query.
 - `POST /query/stream` - stream RAG output using SSE events.
+- `POST /feedback` - record answer feedback.
+- `GET /admin/overview` - local admin/debug summary.
+- `GET /health/models` - runtime model/dependency health check.
 
 Protected endpoints require `X-API-Key` or `Authorization: Bearer <key>` when `APP_API_KEY` is configured.
 
@@ -159,6 +184,27 @@ python .\evals\run_eval.py --live --api-url http://localhost:8000 --api-key repl
 ```
 
 Update `evals/questions.json` with expected source filenames/pages after indexing your own sample PDFs.
+
+## Sample Knowledge Pack
+
+Generate sample PDFs:
+
+```powershell
+python .\sample_docs\generate_sample_pdfs.py
+```
+
+Upload the generated PDFs from `sample_docs/` through the UI. The eval fixture already contains expected source pages for these files:
+
+- `Employee_Handbook.pdf`
+- `Vendor_Onboarding_Guide.pdf`
+- `SLA_Support_Process.pdf`
+- `Security_Access_Control_Policy.pdf`
+
+Then run:
+
+```powershell
+python .\evals\run_eval.py --live --api-url http://localhost:8000
+```
 
 ## Notes
 

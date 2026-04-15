@@ -54,6 +54,8 @@ class Settings(BaseSettings):
 
     # Where the FAISS index is persisted between restarts
     faiss_index_path: str = "data/faiss_index"
+    # SQLite metadata store for document registry, feedback, and admin data.
+    metadata_db_path: str = "data/app_metadata.sqlite3"
 
     # Retrieval
     # Final number of chunks passed to the LLM after reranking.

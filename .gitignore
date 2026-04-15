@@ -25,6 +25,10 @@ __pycache__/
 data/faiss_index/
 backend/data/faiss_index/
 
+# Runtime metadata stores
+data/*.sqlite3
+backend/data/*.sqlite3
+
 # Uploaded PDFs
 data/uploads/
 backend/data/uploads/

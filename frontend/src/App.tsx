@@ -9,6 +9,11 @@ import {
   RotateCcw,
   RefreshCw,
   Trash2,
+  Eye,
+  Heart,
+  ThumbsDown,
+  AlertTriangle,
+  FileSearch,
 } from 'lucide-react';
 import './App.css';
 
@@ -24,8 +29,10 @@ const STARTER_PROMPTS = [
 ];
 
 interface Source {
+  file_hash?: string | null;
   document: string;
   page: number;
+  chunk_index?: number | null;
   relevance_score?: number | null;
   snippet?: string | null;
   section?: string | null;
@@ -74,6 +81,47 @@ interface UploadBatchResponse {
 
 interface KnowledgeBaseFilesResponse {
   files?: KnowledgeBaseFileApiItem[];
+}
+
+interface DocumentChunk {
+  id: string;
+  content: string;
+  page: number;
+  section: string;
+  chunk_index: number;
+  metadata: Record<string, unknown>;
+}
+
+interface DocumentChunksResponse {
+  file_hash: string;
+  filename: string;
+  chunks: DocumentChunk[];
+}
+
+interface ModelHealthItem {
+  name: string;
+  status: string;
+  detail: string;
+}
+
+interface AdminOverview {
+  document_count: number;
+  chunk_count: number;
+  feedback_count: number;
+  recent_feedback: Array<{
+    id: number;
+    created_at: number;
+    question: string;
+    rating: string;
+    reason?: string;
+    confidence_score?: number | null;
+  }>;
+  metadata_db_path: string;
+  embedding_model: string;
+  embedding_device: string;
+  docling_enabled: boolean;
+  reranker_enabled: boolean;
+  openai_enabled: boolean;
 }
 
 interface KnowledgeBaseFileApiItem {
@@ -206,6 +254,13 @@ function App() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [documentActionId, setDocumentActionId] = useState<string | null>(null);
+  const [uploadSteps, setUploadSteps] = useState<string[]>([]);
+  const [selectedChunks, setSelectedChunks] = useState<DocumentChunksResponse | null>(null);
+  const [isLoadingChunks, setIsLoadingChunks] = useState(false);
+  const [feedbackStatus, setFeedbackStatus] = useState<string | null>(null);
+  const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
+  const [modelHealth, setModelHealth] = useState<ModelHealthItem[]>([]);
+  const [isLoadingAdmin, setIsLoadingAdmin] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryInputRef = useRef<HTMLInputElement>(null);
@@ -277,6 +332,22 @@ function App() {
     void loadIndexedFiles();
   }, [loadIndexedFiles]);
 
+  const loadAdminDebug = useCallback(async () => {
+    setIsLoadingAdmin(true);
+    try {
+      const [overviewResponse, healthResponse] = await Promise.all([
+        axios.get<AdminOverview>(`${API_BASE}/admin/overview`, { headers: API_HEADERS }),
+        axios.get<{ checks: ModelHealthItem[] }>(`${API_BASE}/health/models`, { headers: API_HEADERS }),
+      ]);
+      setAdminOverview(overviewResponse.data);
+      setModelHealth(healthResponse.data?.checks || []);
+    } catch (error) {
+      console.warn('Failed to load admin/debug data.', error);
+    } finally {
+      setIsLoadingAdmin(false);
+    }
+  }, []);
+
   const uploadFiles = async (files: File[]) => {
     if (!files.length) return;
 
@@ -288,6 +359,7 @@ function App() {
 
     setIsUploading(true);
     setUploadStatus(`Indexing ${pdfFiles.length} file(s)...`);
+    setUploadSteps(['Queued files', 'Uploading PDFs']);
     
     const formData = new FormData();
     pdfFiles.forEach((file) => formData.append('files', file));
@@ -298,6 +370,15 @@ function App() {
           ...API_HEADERS,
           'Content-Type': 'multipart/form-data',
         },
+        onUploadProgress: (event) => {
+          if (!event.total) return;
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setUploadSteps([
+            'Queued files',
+            `Uploading PDFs (${percent}%)`,
+            'Parsing, chunking, embedding, and saving index',
+          ]);
+        },
       });
       const data = response.data;
       const totalFiles = Number(data?.total_files ?? pdfFiles.length);
@@ -306,6 +387,14 @@ function App() {
       setUploadStatus(
         `Upload completed. Processed ${processedFiles}/${totalFiles} files. Indexed ${totalChunks} chunks.`
       );
+      const methods = [...new Set((data?.files || []).map((item) => item.parsing_method).filter(Boolean))];
+      setUploadSteps([
+        'Queued files',
+        'Uploaded PDFs',
+        methods.length ? `Parsed with ${methods.join(', ')}` : 'Parsed documents',
+        `Indexed ${totalChunks} chunks`,
+        'Complete',
+      ]);
 
       const incoming: KnowledgeFile[] = (data?.files || [])
         .filter((item) => item.status === 'success' || item.status === 'duplicate')
@@ -319,6 +408,7 @@ function App() {
     } catch (error) {
       console.error("Upload error:", error);
       setUploadStatus(getApiErrorMessage(error, "Failed to upload files. Is the backend running?"));
+      setUploadSteps((prev) => [...prev, 'Failed']);
     } finally {
       setIsUploading(false);
       // Reset input
@@ -549,6 +639,63 @@ function App() {
     }
   };
 
+  const openDocumentChunks = async (fileHash: string | null | undefined) => {
+    if (!fileHash) return;
+    setIsLoadingChunks(true);
+    try {
+      const response = await axios.get<DocumentChunksResponse>(
+        `${API_BASE}/knowledge-base/files/${encodeURIComponent(fileHash)}/chunks`,
+        { headers: API_HEADERS }
+      );
+      setSelectedChunks(response.data);
+    } catch (error) {
+      console.error('Chunk load error:', error);
+      setUploadStatus(getApiErrorMessage(error, 'Failed to load source chunks.'));
+    } finally {
+      setIsLoadingChunks(false);
+    }
+  };
+
+  const openSourceChunks = async (source: Source) => {
+    const fileHash = source.file_hash || knowledgeFiles.find((file) => file.filename === source.document)?.fileHash;
+    await openDocumentChunks(fileHash);
+  };
+
+  const submitFeedback = async (
+    assistantMessage: Message,
+    rating: string,
+    reason = '',
+  ) => {
+    const index = messages.findIndex((msg) => msg.id === assistantMessage.id);
+    const previousUser = [...messages.slice(0, index)]
+      .reverse()
+      .find((msg) => msg.role === 'user');
+
+    if (!previousUser) return;
+
+    setFeedbackStatus('Saving feedback...');
+    try {
+      await axios.post(
+        `${API_BASE}/feedback`,
+        {
+          question: previousUser.content,
+          answer: assistantMessage.content,
+          rating,
+          reason,
+          confidence_score: assistantMessage.confidence_score,
+          sources: assistantMessage.sources || [],
+          diagnostics: assistantMessage.diagnostics || undefined,
+        },
+        { headers: API_HEADERS }
+      );
+      setFeedbackStatus('Feedback saved.');
+      void loadAdminDebug();
+    } catch (error) {
+      console.error('Feedback error:', error);
+      setFeedbackStatus(getApiErrorMessage(error, 'Failed to save feedback.'));
+    }
+  };
+
   const latestAssistant = [...messages]
     .reverse()
     .find((msg) => msg.role === 'assistant' && msg.sources && msg.sources.length > 0);
@@ -595,6 +742,14 @@ function App() {
             </div>
           )}
 
+          {uploadSteps.length > 0 && (
+            <ol className="upload-steps">
+              {uploadSteps.map((step, index) => (
+                <li key={`${step}-${index}`}>{step}</li>
+              ))}
+            </ol>
+          )}
+
           <button
             type="button"
             className="reset-kb-btn"
@@ -625,6 +780,14 @@ function App() {
                 <div className="kb-actions">
                   <button
                     type="button"
+                    onClick={() => openDocumentChunks(file.fileHash)}
+                    disabled={isLoadingChunks}
+                  >
+                    <Eye size={13} />
+                    Chunks
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => handleReindexKnowledgeFile(file)}
                     disabled={Boolean(documentActionId) || isUploading || isResetting}
                   >
@@ -651,6 +814,37 @@ function App() {
                 </div>
               </div>
             ))
+          )}
+        </div>
+
+        <div className="admin-panel">
+          <div className="admin-header">
+            <h2>Debug</h2>
+            <button type="button" onClick={() => void loadAdminDebug()} disabled={isLoadingAdmin}>
+              {isLoadingAdmin ? <Loader2 size={13} className="animate-spin" /> : <FileSearch size={13} />}
+              Refresh
+            </button>
+          </div>
+          {adminOverview ? (
+            <div className="admin-stats">
+              <span>{adminOverview.document_count} docs</span>
+              <span>{adminOverview.chunk_count} chunks</span>
+              <span>{adminOverview.feedback_count} feedback</span>
+              <span>Docling {adminOverview.docling_enabled ? 'on' : 'off'}</span>
+              <span>Reranker {adminOverview.reranker_enabled ? 'on' : 'off'}</span>
+            </div>
+          ) : (
+            <p className="empty-kb">Refresh to inspect runtime status.</p>
+          )}
+          {modelHealth.length > 0 && (
+            <div className="health-list">
+              {modelHealth.map((item) => (
+                <div key={item.name} className={`health-item ${item.status}`}>
+                  <strong>{item.name}</strong>
+                  <span>{item.status}</span>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </aside>
@@ -693,6 +887,25 @@ function App() {
                 <div key={msg.id} className={`chat-row ${msg.role}`}>
                   <div className={`chat-bubble ${msg.role}`}>
                     {msg.role === 'assistant' ? <ReactMarkdown>{msg.content}</ReactMarkdown> : <p>{msg.content}</p>}
+                    {msg.role === 'assistant' && msg.content && (
+                      <div className="feedback-row">
+                        <button type="button" onClick={() => void submitFeedback(msg, 'helpful')}>
+                          <Heart size={13} />
+                          Helpful
+                        </button>
+                        <button type="button" onClick={() => void submitFeedback(msg, 'not_helpful')}>
+                          <ThumbsDown size={13} />
+                          Not helpful
+                        </button>
+                        <button type="button" onClick={() => void submitFeedback(msg, 'wrong_source', 'wrong_source')}>
+                          <AlertTriangle size={13} />
+                          Wrong source
+                        </button>
+                        <button type="button" onClick={() => void submitFeedback(msg, 'missing_info', 'missing_info')}>
+                          Missing info
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -769,9 +982,38 @@ function App() {
                   <p className="context-snippet">
                     {src.snippet?.trim() || 'Snippet unavailable.'}
                   </p>
+                  <button
+                    type="button"
+                    className="source-view-btn"
+                    onClick={() => void openSourceChunks(src)}
+                    disabled={isLoadingChunks}
+                  >
+                    <Eye size={13} />
+                    Open source chunks
+                  </button>
                 </article>
               );
             })}
+          </div>
+        )}
+        {feedbackStatus && <p className="feedback-status">{feedbackStatus}</p>}
+        {selectedChunks && (
+          <div className="chunk-viewer">
+            <div className="chunk-viewer-header">
+              <h4>{selectedChunks.filename}</h4>
+              <button type="button" onClick={() => setSelectedChunks(null)}>Close</button>
+            </div>
+            {selectedChunks.chunks.length === 0 ? (
+              <p className="empty-context">No chunks found for this document.</p>
+            ) : (
+              selectedChunks.chunks.slice(0, 12).map((chunk) => (
+                <article key={chunk.id} className="chunk-item">
+                  <strong>Page {chunk.page || 'n/a'} · Chunk {chunk.chunk_index}</strong>
+                  {chunk.section && <span>{chunk.section}</span>}
+                  <p>{chunk.content}</p>
+                </article>
+              ))
+            )}
           </div>
         )}
       </aside>

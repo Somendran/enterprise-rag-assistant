@@ -7,7 +7,7 @@ explicit and easy to change.
 """
 
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 # ── /upload ──────────────────────────────────────────────────────────────────
@@ -83,6 +83,25 @@ class DeleteKnowledgeBaseFileResponse(BaseModel):
     message: str = Field(..., description="Human-readable result message.")
 
 
+class DocumentChunkItem(BaseModel):
+    """Inspectable chunk stored for one document."""
+
+    id: str = Field(..., description="Internal vector-store document id.")
+    content: str = Field(..., description="Chunk text.")
+    page: int = Field(default=0, description="Source page.")
+    section: str = Field(default="", description="Detected section or heading.")
+    chunk_index: int = Field(default=0, description="Chunk order within the document.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Raw chunk metadata.")
+
+
+class DocumentChunksResponse(BaseModel):
+    """Returned when inspecting stored chunks for one document."""
+
+    file_hash: str = Field(..., description="Document hash.")
+    filename: str = Field(default="", description="Document filename.")
+    chunks: List[DocumentChunkItem] = Field(default_factory=list)
+
+
 # ── /query ───────────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
@@ -100,8 +119,10 @@ class QueryRequest(BaseModel):
 class SourceReference(BaseModel):
     """Points to the exact document chunk used to generate part of the answer."""
 
+    file_hash: Optional[str] = Field(default=None, description="Source document hash.")
     document: str = Field(..., description="Source filename (PDF name).")
     page: int = Field(..., description="Page number within the PDF (1-indexed).")
+    chunk_index: Optional[int] = Field(default=None, description="Chunk index within the source document.")
     relevance_score: Optional[float] = Field(
         default=None,
         description="Normalized relevance confidence in range [0, 1].",
@@ -170,3 +191,56 @@ class QueryResponse(BaseModel):
         default=None,
         description="Retrieval diagnostics emitted when enabled in configuration.",
     )
+
+
+class FeedbackRequest(BaseModel):
+    """User feedback attached to an answer."""
+
+    question: str = Field(..., min_length=1, max_length=2000)
+    answer: str = Field(..., min_length=1, max_length=20000)
+    rating: str = Field(..., description="helpful, not_helpful, wrong_source, or missing_info.")
+    reason: str = Field(default="", max_length=200)
+    comment: str = Field(default="", max_length=2000)
+    confidence_score: Optional[float] = None
+    sources: List[SourceReference] = Field(default_factory=list)
+    diagnostics: Optional[RetrievalDiagnostics] = None
+
+
+class FeedbackResponse(BaseModel):
+    """Stored feedback response."""
+
+    id: int
+    created_at: int
+    rating: str
+    reason: str = ""
+    comment: str = ""
+    message: str = "Feedback recorded."
+
+
+class ModelHealthItem(BaseModel):
+    """One runtime dependency health check."""
+
+    name: str
+    status: str
+    detail: str = ""
+
+
+class ModelHealthResponse(BaseModel):
+    """Runtime model and dependency health."""
+
+    checks: List[ModelHealthItem] = Field(default_factory=list)
+
+
+class AdminOverviewResponse(BaseModel):
+    """Summary for local admin/debug panel."""
+
+    document_count: int
+    chunk_count: int
+    feedback_count: int
+    recent_feedback: List[dict[str, Any]] = Field(default_factory=list)
+    metadata_db_path: str
+    embedding_model: str
+    embedding_device: str
+    docling_enabled: bool
+    reranker_enabled: bool
+    openai_enabled: bool

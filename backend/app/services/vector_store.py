@@ -41,6 +41,7 @@ from app.services.embedding_service import (
     is_local_embedding_backend,
     embedding_backend_name,
 )
+from app.services import metadata_store
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -52,6 +53,7 @@ _store: Optional[FAISS] = None
 _META_FILENAME = "index_meta.json"
 _DOC_REGISTRY_FILENAME = "document_registry.json"
 _write_lock = threading.Lock()
+_migration_checked = False
 
 
 def _get_index_dimension(store: FAISS) -> Optional[int]:
@@ -154,6 +156,35 @@ def _write_index_meta(index_path: str, dimension: Optional[int]) -> None:
     meta_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _migrate_json_registry_if_needed() -> None:
+    """Move the old model-scoped JSON registry into SQLite once."""
+    global _migration_checked
+    if _migration_checked:
+        return
+
+    _migration_checked = True
+    index_path = _index_path()
+    registry = _read_doc_registry(index_path)
+    if not registry:
+        return
+
+    for file_hash, meta in registry.items():
+        if not isinstance(meta, dict) or metadata_store.document_exists(file_hash):
+            continue
+        metadata_store.upsert_document(
+            file_hash=file_hash,
+            filename=str(meta.get("filename", "unknown")),
+            chunk_count=int(meta.get("chunk_count", 0) or 0),
+            document_id=str(meta.get("document_id", "")),
+            embedding_model=str(meta.get("embedding_model", settings.embedding_model)),
+            indexed_at=int(meta.get("indexed_at", 0) or 0),
+            parsing_method=str(meta.get("parsing_method", "unknown")),
+            upload_path=str(meta.get("upload_path", "")),
+            upload_status=str(meta.get("upload_status", "indexed")),
+            vision_calls_used=int(meta.get("vision_calls_used", 0) or 0),
+        )
+
+
 def _resolve_current_embedding_dimension(index_path: str, embeddings: Embeddings) -> Optional[int]:
     """
     Resolve current embedding dimension.
@@ -189,9 +220,8 @@ def _reset_persisted_index(index_path: str) -> None:
 
 def is_document_indexed(file_hash: str) -> bool:
     """Return True when the same file hash has already been ingested."""
-    index_path = _index_path()
-    registry = _read_doc_registry(index_path)
-    return file_hash in registry
+    _migrate_json_registry_if_needed()
+    return metadata_store.document_exists(file_hash)
 
 
 def register_indexed_document(
@@ -205,60 +235,30 @@ def register_indexed_document(
     vision_calls_used: int = 0,
 ) -> None:
     """Persist hash and document metadata for duplicate prevention."""
-    index_path = _index_path()
-    registry = _read_doc_registry(index_path)
-    registry[file_hash] = {
-        "filename": filename,
-        "chunk_count": chunk_count,
-        "document_id": document_id,
-        "embedding_model": settings.embedding_model,
-        "indexed_at": int(time.time()),
-        "parsing_method": parsing_method,
-        "upload_path": upload_path,
-        "upload_status": upload_status,
-        "vision_calls_used": int(vision_calls_used or 0),
-    }
-    _write_doc_registry(index_path, registry)
+    metadata_store.upsert_document(
+        file_hash=file_hash,
+        filename=filename,
+        chunk_count=chunk_count,
+        document_id=document_id,
+        embedding_model=settings.embedding_model,
+        indexed_at=int(time.time()),
+        parsing_method=parsing_method,
+        upload_path=upload_path,
+        upload_status=upload_status,
+        vision_calls_used=vision_calls_used,
+    )
 
 
 def list_indexed_documents() -> list[dict[str, Any]]:
     """Return persisted indexed document metadata for UI display."""
-    index_path = _index_path()
-    registry = _read_doc_registry(index_path)
-
-    items: list[dict[str, Any]] = []
-    for file_hash, meta in registry.items():
-        if not isinstance(meta, dict):
-            continue
-        items.append(
-            {
-                "file_hash": file_hash,
-                "document_id": str(meta.get("document_id", "")),
-                "filename": str(meta.get("filename", "unknown")),
-                "chunk_count": int(meta.get("chunk_count", 0) or 0),
-                "indexed_at": int(meta.get("indexed_at", 0) or 0),
-                "parsing_method": str(meta.get("parsing_method", "unknown")),
-                "upload_status": str(meta.get("upload_status", "indexed")),
-                "vision_calls_used": int(meta.get("vision_calls_used", 0) or 0),
-                "embedding_model": str(meta.get("embedding_model", settings.embedding_model)),
-            }
-        )
-
-    items.sort(key=lambda x: (x["filename"].lower(), -x["indexed_at"]))
-    return items
+    _migrate_json_registry_if_needed()
+    return metadata_store.list_documents()
 
 
 def get_indexed_document(file_hash: str) -> Optional[dict[str, Any]]:
     """Return registry metadata for one document hash if present."""
-    index_path = _index_path()
-    registry = _read_doc_registry(index_path)
-    meta = registry.get(file_hash)
-    if not isinstance(meta, dict):
-        return None
-    return {
-        "file_hash": file_hash,
-        **meta,
-    }
+    _migrate_json_registry_if_needed()
+    return metadata_store.get_document(file_hash)
 
 
 def delete_indexed_document(file_hash: str) -> dict[str, Any]:
@@ -272,8 +272,8 @@ def delete_indexed_document(file_hash: str) -> dict[str, Any]:
 
     with _write_lock:
         index_path = _index_path()
-        registry = _read_doc_registry(index_path)
-        meta = registry.get(file_hash)
+        _migrate_json_registry_if_needed()
+        meta = metadata_store.get_document(file_hash)
         if not isinstance(meta, dict):
             raise KeyError(f"Document not found: {file_hash}")
 
@@ -305,8 +305,7 @@ def delete_indexed_document(file_hash: str) -> dict[str, Any]:
                 store.save_local(index_path)
                 _write_index_meta(index_path, _get_index_dimension(store))
 
-        registry.pop(file_hash, None)
-        _write_doc_registry(index_path, registry)
+        metadata_store.delete_document(file_hash)
 
         return {
             "file_hash": file_hash,
@@ -314,6 +313,35 @@ def delete_indexed_document(file_hash: str) -> dict[str, Any]:
             "chunks_deleted": chunks_deleted,
             "upload_path": str(meta.get("upload_path", "")),
         }
+
+
+def list_document_chunks(file_hash: str) -> list[dict[str, Any]]:
+    """Return all stored chunks for one indexed document."""
+    store = get_or_create_store()
+    if store is None:
+        return []
+
+    docstore = getattr(store, "docstore", None)
+    doc_dict = getattr(docstore, "_dict", {}) if docstore is not None else {}
+    chunks: list[dict[str, Any]] = []
+
+    for docstore_id, doc in doc_dict.items():
+        metadata = getattr(doc, "metadata", {}) or {}
+        if metadata.get("file_hash") != file_hash:
+            continue
+        chunks.append(
+            {
+                "id": str(docstore_id),
+                "content": str(getattr(doc, "page_content", "") or ""),
+                "page": int(metadata.get("page", 0) or 0),
+                "section": str(metadata.get("section") or metadata.get("section_hint") or ""),
+                "chunk_index": int(metadata.get("chunk_index", 0) or 0),
+                "metadata": dict(metadata),
+            }
+        )
+
+    chunks.sort(key=lambda item: (int(item.get("page", 0)), int(item.get("chunk_index", 0))))
+    return chunks
 
 
 def get_or_create_store() -> FAISS:
@@ -561,4 +589,5 @@ def reset_vector_store() -> bool:
         existed = Path(index_path).exists()
         _store = None
         _reset_persisted_index(index_path)
+        metadata_store.clear_documents()
         return existed

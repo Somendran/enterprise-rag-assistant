@@ -276,8 +276,10 @@ def _extract_sources(
             snippet = snippet_raw[:220].strip()
             sources.append(
                 SourceReference(
+                    file_hash=str(chunk.document.metadata.get("file_hash") or "") or None,
                     document=source,
                     page=page,
+                    chunk_index=int(chunk.document.metadata.get("chunk_index", 0) or 0),
                     relevance_score=round(float(chunk.final_score), 4),
                     snippet=snippet or None,
                     section=(

@@ -2,7 +2,7 @@
   {
     "id": "leave-policy-summary",
     "question": "Summarize the leave policy.",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 1}],
     "expected_keywords": ["leave"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -12,7 +12,7 @@
   {
     "id": "leave-eligibility",
     "question": "Who is eligible for annual leave?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 1}],
     "expected_keywords": ["eligible", "leave"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -22,7 +22,7 @@
   {
     "id": "benefits-eligibility",
     "question": "Who is eligible for employee benefits?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 2}],
     "expected_keywords": ["benefits", "eligible"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -32,7 +32,7 @@
   {
     "id": "vendor-onboarding-steps",
     "question": "What are the vendor onboarding steps?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 1}],
     "expected_keywords": ["vendor", "onboarding"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -42,7 +42,7 @@
   {
     "id": "vendor-required-documents",
     "question": "What documents are required before a vendor can be approved?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 2}],
     "expected_keywords": ["vendor", "document"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -52,7 +52,7 @@
   {
     "id": "sla-escalation-path",
     "question": "Where is the SLA escalation path documented?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 1}],
     "expected_keywords": ["sla", "escalation"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -62,7 +62,7 @@
   {
     "id": "security-access-control",
     "question": "What does the security policy require for access control?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 1}],
     "expected_keywords": ["security", "access"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -72,7 +72,7 @@
   {
     "id": "incident-reporting",
     "question": "How should employees report a security incident?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 2}],
     "expected_keywords": ["incident", "report"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -82,7 +82,7 @@
   {
     "id": "data-retention",
     "question": "What are the data retention requirements?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 3}],
     "expected_keywords": ["data", "retention"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
@@ -92,7 +92,7 @@
   {
     "id": "travel-reimbursement",
     "question": "What expenses are reimbursable for business travel?",
-    "expected_sources": [],
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 3}],
     "expected_keywords": ["travel", "reimburs"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,

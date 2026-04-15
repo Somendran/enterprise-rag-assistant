@@ -20,6 +20,7 @@ from app.services.vector_store import (
     delete_indexed_document,
     get_indexed_document,
     is_document_indexed,
+    list_document_chunks,
     list_indexed_documents,
     register_indexed_document,
     reset_vector_store,
@@ -30,6 +31,7 @@ from app.models.schemas import (
     UploadItemResult,
     ResetKnowledgeBaseResponse,
     DeleteKnowledgeBaseFileResponse,
+    DocumentChunksResponse,
 )
 from app.config import settings
 from app.utils.logger import get_logger
@@ -133,6 +135,28 @@ def _prepare_chunks_for_indexing(
 async def list_knowledge_base_files() -> KnowledgeBaseFilesResponse:
     files = list_indexed_documents()
     return KnowledgeBaseFilesResponse(files=files)
+
+
+@router.get(
+    "/knowledge-base/files/{file_hash}/chunks",
+    response_model=DocumentChunksResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Inspect indexed chunks for one file",
+    description="Returns stored chunk text and metadata for source inspection/debugging.",
+)
+async def list_knowledge_base_file_chunks(file_hash: str) -> DocumentChunksResponse:
+    meta = get_indexed_document(file_hash)
+    if meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+    chunks = list_document_chunks(file_hash)
+    return DocumentChunksResponse(
+        file_hash=file_hash,
+        filename=str(meta.get("filename", "")),
+        chunks=chunks,
+    )
 
 
 @router.post(
