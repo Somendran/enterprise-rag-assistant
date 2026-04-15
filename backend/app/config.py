@@ -16,10 +16,8 @@ class Settings(BaseSettings):
     allowed_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Model identifiers
-    embedding_backend: str = "local_hf"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_device: str = "cpu"
-    hash_embedding_dimensions: int = 384
     # Local Ollama generation defaults.
     local_llm_endpoint: str = "http://localhost:11434/api/generate"
     local_llm_model: str = "gemma4:e2b"

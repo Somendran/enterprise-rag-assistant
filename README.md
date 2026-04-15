@@ -68,47 +68,6 @@ npm run dev
 
 The frontend defaults to `http://localhost:8000` for the API and runs at `http://localhost:5173/`.
 
-## Docker Setup
-
-Create the backend env file first:
-
-```powershell
-Copy-Item .\backend\.env.example .\backend\.env
-```
-
-Then start both services:
-
-```powershell
-docker compose up --build
-```
-
-The frontend is served at `http://localhost:8080/` and the backend API is served at `http://localhost:8000/`.
-
-The compose setup persists uploads and FAISS data in the `backend-data` Docker volume. When using local Ollama from Docker, the backend defaults to `http://host.docker.internal:11434` for local generation and vision endpoints.
-
-Avoid sharing `docker compose config` output when real secrets are present because Compose expands values from `backend/.env`.
-
-The backend Docker image uses `backend/requirements.docker.txt`, a slimmer dependency set that disables Docling, neural reranking, and HuggingFace/PyTorch embeddings by default to keep builds manageable. Docker uses `EMBEDDING_BACKEND=hash`, a lightweight deterministic embedding backend that is useful for demos and CI but less semantically accurate than local HuggingFace embeddings. Local development can still use the full `backend/requirements.txt`.
-
-To enable the heavier Docker path, add the missing optional packages to `backend/requirements.docker.txt` and set:
-
-```powershell
-$env:EMBEDDING_BACKEND='local_hf'
-$env:ENABLE_DOCLING='true'
-$env:ENABLE_NEURAL_RERANKER='true'
-docker compose up --build
-```
-
-For a production-like Docker run, set matching API keys for backend and frontend build-time config:
-
-```powershell
-$env:APP_ENV='production'
-$env:APP_API_KEY='replace-with-a-long-random-secret'
-$env:VITE_API_KEY='replace-with-a-long-random-secret'
-$env:VITE_API_URL='http://localhost:8000'
-docker compose up --build
-```
-
 ## API Key Setup
 
 For local development, `APP_API_KEY` can be left empty.
@@ -137,7 +96,6 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 | `APP_API_KEY` | Optional local API key; required in production. |
 | `ALLOWED_CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS. |
 | `MAX_UPLOAD_SIZE_MB` | Maximum PDF upload size handled by the app. |
-| `EMBEDDING_BACKEND` | `local_hf` for full local embeddings, `hash` for lightweight Docker demos. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
 | `EMBEDDING_DEVICE` | Defaults to `cpu` for portability. Set `cuda` only for local GPU acceleration. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |
