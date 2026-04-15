@@ -1,4 +1,9 @@
-"""HuggingFace embedding backend for FAISS indexing and querying."""
+"""
+embedding_service.py
+
+Responsibility: provide the local HuggingFace sentence-transformers client
+used for FAISS indexing and querying.
+"""
 
 from functools import lru_cache
 
@@ -12,36 +17,23 @@ logger = get_logger(__name__)
 DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-def _torch_cuda_available() -> bool:
-    try:
-        import torch  # type: ignore
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
-
-
 def _resolve_embedding_device() -> str:
     requested = (settings.embedding_device or "cpu").strip().lower()
-    if requested not in {"auto", "cpu", "cuda"}:
-        logger.warning("Unsupported EMBEDDING_DEVICE='%s'. Falling back to CPU.", requested)
-        requested = "cpu"
-
-    if requested == "cpu":
-        return "cpu"
-
-    cuda_available = _torch_cuda_available()
-    if requested == "cuda":
-        if cuda_available:
-            return "cuda"
-        logger.warning("EMBEDDING_DEVICE=cuda requested but CUDA is unavailable. Falling back to CPU.")
-        return "cpu"
-
-    return "cuda" if cuda_available else "cpu"
+    if requested != "cpu":
+        logger.warning(
+            "EMBEDDING_DEVICE='%s' is ignored. This project runs embeddings on CPU.",
+            requested,
+        )
+    return "cpu"
 
 
 class LocalHuggingFaceEmbeddings(Embeddings):
-    """Wrap HuggingFaceEmbeddings with the Embeddings interface."""
+    """
+    Wrap HuggingFaceEmbeddings with a stable local model.
+
+    The class preserves the Embeddings interface expected by FAISS and
+    the rest of the RAG pipeline.
+    """
 
     def __init__(self, model_name: str, batch_size: int = 32, device: str = "cpu"):
         self.model_name = model_name

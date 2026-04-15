@@ -97,7 +97,7 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 | `ALLOWED_CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS. |
 | `MAX_UPLOAD_SIZE_MB` | Maximum PDF upload size handled by the app. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
-| `EMBEDDING_DEVICE` | Defaults to `cpu` for portability. Set `cuda` only for local GPU acceleration. |
+| `EMBEDDING_DEVICE` | CPU-only for this project. Keep this as `cpu`. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |
 | `OPENAI_API_KEY` | OpenAI key for generation, summaries, or vision enrichment. |
 | `LOCAL_LLM_ENDPOINT` | Ollama generation endpoint. |
