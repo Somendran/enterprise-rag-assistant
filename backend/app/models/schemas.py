@@ -29,6 +29,10 @@ class UploadItemResult(BaseModel):
     chunks_indexed: int = Field(..., description="Number of chunks indexed for this file.")
     status: str = Field(..., description="success, duplicate, or failed.")
     message: str = Field(..., description="Human-readable outcome message for this file.")
+    file_hash: Optional[str] = Field(default=None, description="SHA-256 file hash for document operations.")
+    document_id: Optional[str] = Field(default=None, description="Stable internal document id.")
+    parsing_method: Optional[str] = Field(default=None, description="Parser path used for ingestion.")
+    vision_calls_used: int = Field(default=0, description="Vision enrichment calls used during ingestion.")
 
 
 class UploadBatchResponse(BaseModel):
@@ -52,15 +56,31 @@ class ResetKnowledgeBaseResponse(BaseModel):
 class KnowledgeBaseFileItem(BaseModel):
     """Indexed document metadata used by sidebar file list."""
 
+    file_hash: str = Field(..., description="SHA-256 file hash used as document key.")
+    document_id: str = Field(default="", description="Stable internal document id.")
     filename: str = Field(..., description="Indexed document filename.")
     chunk_count: int = Field(..., description="Number of indexed chunks for the document.")
     indexed_at: int = Field(..., description="Unix timestamp when document was indexed.")
+    parsing_method: str = Field(default="unknown", description="Parser path used for ingestion.")
+    upload_status: str = Field(default="indexed", description="Current document status.")
+    vision_calls_used: int = Field(default=0, description="Vision enrichment calls used during ingestion.")
+    embedding_model: str = Field(default="", description="Embedding model used for this document.")
 
 
 class KnowledgeBaseFilesResponse(BaseModel):
     """List of indexed files currently present in the registry."""
 
     files: List[KnowledgeBaseFileItem] = Field(default_factory=list)
+
+
+class DeleteKnowledgeBaseFileResponse(BaseModel):
+    """Returned after deleting a single indexed document."""
+
+    file_hash: str = Field(..., description="Deleted document hash.")
+    filename: str = Field(default="", description="Deleted document filename.")
+    chunks_deleted: int = Field(default=0, description="Number of vector chunks removed.")
+    upload_deleted: bool = Field(default=False, description="Whether the stored PDF was deleted.")
+    message: str = Field(..., description="Human-readable result message.")
 
 
 # ── /query ───────────────────────────────────────────────────────────────────
@@ -90,6 +110,12 @@ class SourceReference(BaseModel):
         default=None,
         description="Short excerpt from the retrieved chunk for quick context preview.",
     )
+    section: Optional[str] = Field(default=None, description="Detected section or heading for the chunk.")
+    vector_score: Optional[float] = Field(default=None, description="Vector similarity confidence.")
+    lexical_score: Optional[float] = Field(default=None, description="Lexical overlap score.")
+    bm25_score: Optional[float] = Field(default=None, description="BM25-style score.")
+    final_score: Optional[float] = Field(default=None, description="Final score after reranking or blending.")
+    reranker_applied: Optional[bool] = Field(default=None, description="Whether neural reranking affected ranking.")
 
 
 class RetrievalDiagnostics(BaseModel):

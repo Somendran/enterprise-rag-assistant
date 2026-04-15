@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -7,6 +7,8 @@ import {
   Loader2,
   Paperclip,
   RotateCcw,
+  RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import './App.css';
 
@@ -26,13 +28,30 @@ interface Source {
   page: number;
   relevance_score?: number | null;
   snippet?: string | null;
+  section?: string | null;
+  vector_score?: number | null;
+  lexical_score?: number | null;
+  bm25_score?: number | null;
+  final_score?: number | null;
+  reranker_applied?: boolean | null;
 }
 
 interface RetrievalDiagnostics {
   query_variants_used: string[];
   is_broad_question: boolean;
+  is_simple_query?: boolean;
+  fast_mode_applied?: boolean;
   fallback_applied: boolean;
   candidates_considered: number;
+  reranker_applied?: boolean;
+  reranker_skipped_reason?: string;
+  retrieval_ms?: number;
+  rerank_ms?: number;
+  context_build_ms?: number;
+  generation_ms?: number;
+  total_pipeline_ms?: number;
+  low_confidence_fallback_used?: boolean;
+  verification_applied?: boolean;
 }
 
 interface UploadItemResult {
@@ -40,6 +59,10 @@ interface UploadItemResult {
   chunks_indexed: number;
   status: 'success' | 'duplicate' | 'failed' | string;
   message: string;
+  file_hash?: string | null;
+  document_id?: string | null;
+  parsing_method?: string | null;
+  vision_calls_used?: number;
 }
 
 interface UploadBatchResponse {
@@ -50,16 +73,31 @@ interface UploadBatchResponse {
 }
 
 interface KnowledgeBaseFilesResponse {
-  files?: Array<{
-    filename: string;
-    chunk_count: number;
-    indexed_at: number;
-  }>;
+  files?: KnowledgeBaseFileApiItem[];
+}
+
+interface KnowledgeBaseFileApiItem {
+  file_hash: string;
+  document_id?: string;
+  filename: string;
+  chunk_count: number;
+  indexed_at: number;
+  parsing_method?: string;
+  upload_status?: string;
+  vision_calls_used?: number;
+  embedding_model?: string;
 }
 
 interface KnowledgeFile {
+  fileHash: string;
+  documentId?: string;
   filename: string;
   chunks: number;
+  indexedAt: number;
+  parsingMethod: string;
+  uploadStatus: string;
+  visionCallsUsed: number;
+  embeddingModel: string;
 }
 
 interface Message {
@@ -98,22 +136,64 @@ function getApiErrorMessage(error: unknown, fallback: string): string {
 }
 
 function mergeKnowledgeFiles(current: KnowledgeFile[], incoming: KnowledgeFile[]): KnowledgeFile[] {
-  const byName = new Map<string, KnowledgeFile>();
+  const byKey = new Map<string, KnowledgeFile>();
   for (const item of current) {
-    byName.set(item.filename, item);
+    byKey.set(item.fileHash || item.filename, item);
   }
   for (const item of incoming) {
-    const existing = byName.get(item.filename);
+    const key = item.fileHash || item.filename;
+    const existing = byKey.get(key);
     if (!existing) {
-      byName.set(item.filename, item);
+      byKey.set(key, item);
       continue;
     }
-    byName.set(item.filename, {
+    byKey.set(key, {
+      ...existing,
+      ...item,
       filename: item.filename,
       chunks: Math.max(existing.chunks, item.chunks),
     });
   }
-  return [...byName.values()].sort((a, b) => a.filename.localeCompare(b.filename));
+  return [...byKey.values()].sort((a, b) => a.filename.localeCompare(b.filename));
+}
+
+function mapKnowledgeFile(item: KnowledgeBaseFileApiItem): KnowledgeFile {
+  return {
+    fileHash: item.file_hash,
+    documentId: item.document_id,
+    filename: item.filename,
+    chunks: Number(item.chunk_count || 0),
+    indexedAt: Number(item.indexed_at || 0),
+    parsingMethod: item.parsing_method || 'unknown',
+    uploadStatus: item.upload_status || 'indexed',
+    visionCallsUsed: Number(item.vision_calls_used || 0),
+    embeddingModel: item.embedding_model || '',
+  };
+}
+
+function mapUploadResult(item: UploadItemResult): KnowledgeFile | null {
+  if (!item.file_hash) return null;
+  return {
+    fileHash: item.file_hash,
+    documentId: item.document_id || undefined,
+    filename: item.filename,
+    chunks: Number(item.chunks_indexed || 0),
+    indexedAt: Math.floor(Date.now() / 1000),
+    parsingMethod: item.parsing_method || 'unknown',
+    uploadStatus: item.status === 'duplicate' ? 'duplicate' : 'indexed',
+    visionCallsUsed: Number(item.vision_calls_used || 0),
+    embeddingModel: '',
+  };
+}
+
+function formatIndexedAt(value: number): string {
+  if (!value) return 'Indexed time unknown';
+  return new Date(value * 1000).toLocaleString();
+}
+
+function formatPercent(value?: number | null): string {
+  if (typeof value !== 'number') return 'n/a';
+  return `${Math.round(value * 100)}%`;
 }
 
 function App() {
@@ -125,6 +205,7 @@ function App() {
   const [isQuerying, setIsQuerying] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [documentActionId, setDocumentActionId] = useState<string | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryInputRef = useRef<HTMLInputElement>(null);
@@ -178,26 +259,23 @@ function App() {
     shouldAutoScrollRef.current = false;
   };
 
-  useEffect(() => {
-    const loadIndexedFiles = async () => {
-      try {
-        const response = await axios.get<KnowledgeBaseFilesResponse>(
-          `${API_BASE}/knowledge-base/files`,
-          { headers: API_HEADERS }
-        );
-        const files = (response.data?.files || []).map((item) => ({
-          filename: item.filename,
-          chunks: Number(item.chunk_count || 0),
-        }));
-        setKnowledgeFiles(files);
-      } catch (error) {
-        // Keep UI usable even if this optional hydration call fails.
-        console.warn('Failed to load indexed files on startup.', error);
-      }
-    };
-
-    void loadIndexedFiles();
+  const loadIndexedFiles = useCallback(async () => {
+    try {
+      const response = await axios.get<KnowledgeBaseFilesResponse>(
+        `${API_BASE}/knowledge-base/files`,
+        { headers: API_HEADERS }
+      );
+      const files = (response.data?.files || []).map(mapKnowledgeFile);
+      setKnowledgeFiles(files);
+    } catch (error) {
+      // Keep UI usable even if this optional hydration call fails.
+      console.warn('Failed to load indexed files on startup.', error);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadIndexedFiles();
+  }, [loadIndexedFiles]);
 
   const uploadFiles = async (files: File[]) => {
     if (!files.length) return;
@@ -231,12 +309,12 @@ function App() {
 
       const incoming: KnowledgeFile[] = (data?.files || [])
         .filter((item) => item.status === 'success' || item.status === 'duplicate')
-        .map((item) => ({
-          filename: item.filename,
-          chunks: Number(item.chunks_indexed || 0),
-        }));
+        .map(mapUploadResult)
+        .filter((item): item is KnowledgeFile => item !== null);
       if (incoming.length) {
         setKnowledgeFiles((prev) => mergeKnowledgeFiles(prev, incoming));
+      } else {
+        void loadIndexedFiles();
       }
     } catch (error) {
       console.error("Upload error:", error);
@@ -415,11 +493,68 @@ function App() {
     }
   };
 
+  const handleDeleteKnowledgeFile = async (file: KnowledgeFile) => {
+    if (!file.fileHash || documentActionId) return;
+
+    const confirmed = window.confirm(`Delete ${file.filename} from the knowledge base?`);
+    if (!confirmed) return;
+
+    const actionId = `delete:${file.fileHash}`;
+    setDocumentActionId(actionId);
+    setUploadStatus(`Deleting ${file.filename}...`);
+
+    try {
+      const response = await axios.delete(
+        `${API_BASE}/knowledge-base/files/${encodeURIComponent(file.fileHash)}`,
+        { headers: API_HEADERS }
+      );
+      const chunksDeleted = Number(response.data?.chunks_deleted ?? 0);
+      setKnowledgeFiles((prev) => prev.filter((item) => item.fileHash !== file.fileHash));
+      setUploadStatus(`Deleted ${file.filename}. Removed ${chunksDeleted} chunk(s).`);
+    } catch (error) {
+      console.error('Delete error:', error);
+      setUploadStatus(getApiErrorMessage(error, `Failed to delete ${file.filename}.`));
+    } finally {
+      setDocumentActionId(null);
+    }
+  };
+
+  const handleReindexKnowledgeFile = async (file: KnowledgeFile) => {
+    if (!file.fileHash || documentActionId) return;
+
+    const actionId = `reindex:${file.fileHash}`;
+    setDocumentActionId(actionId);
+    setUploadStatus(`Reindexing ${file.filename}...`);
+
+    try {
+      const response = await axios.post<UploadItemResult>(
+        `${API_BASE}/knowledge-base/files/${encodeURIComponent(file.fileHash)}/reindex`,
+        undefined,
+        { headers: API_HEADERS }
+      );
+      const updated = mapUploadResult(response.data);
+      if (updated) {
+        setKnowledgeFiles((prev) => mergeKnowledgeFiles(prev, [updated]));
+      } else {
+        void loadIndexedFiles();
+      }
+      setUploadStatus(
+        `Reindexed ${file.filename}. Indexed ${Number(response.data?.chunks_indexed || 0)} chunk(s).`
+      );
+    } catch (error) {
+      console.error('Reindex error:', error);
+      setUploadStatus(getApiErrorMessage(error, `Failed to reindex ${file.filename}.`));
+    } finally {
+      setDocumentActionId(null);
+    }
+  };
+
   const latestAssistant = [...messages]
     .reverse()
     .find((msg) => msg.role === 'assistant' && msg.sources && msg.sources.length > 0);
 
   const contextCards = latestAssistant?.sources?.slice(0, 4) || [];
+  const latestDiagnostics = latestAssistant?.diagnostics || null;
 
   return (
     <div className="ui-shell">
@@ -476,9 +611,44 @@ function App() {
             <p className="empty-kb">No indexed files yet.</p>
           ) : (
             knowledgeFiles.map((file) => (
-              <div key={file.filename} className="kb-item">
-                <strong>{file.filename}</strong>
-                <span>({file.chunks} chunks)</span>
+              <div key={file.fileHash || file.filename} className="kb-item">
+                <div className="kb-item-main">
+                  <strong>{file.filename}</strong>
+                  <span>{file.chunks} chunks</span>
+                </div>
+                <div className="kb-meta">
+                  <span>{file.parsingMethod}</span>
+                  <span>{file.uploadStatus}</span>
+                  {file.visionCallsUsed > 0 && <span>{file.visionCallsUsed} vision calls</span>}
+                </div>
+                <p className="kb-indexed-at">{formatIndexedAt(file.indexedAt)}</p>
+                <div className="kb-actions">
+                  <button
+                    type="button"
+                    onClick={() => handleReindexKnowledgeFile(file)}
+                    disabled={Boolean(documentActionId) || isUploading || isResetting}
+                  >
+                    {documentActionId === `reindex:${file.fileHash}` ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={13} />
+                    )}
+                    Reindex
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => handleDeleteKnowledgeFile(file)}
+                    disabled={Boolean(documentActionId) || isUploading || isResetting}
+                  >
+                    {documentActionId === `delete:${file.fileHash}` ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={13} />
+                    )}
+                    Delete
+                  </button>
+                </div>
               </div>
             ))
           )}
@@ -561,16 +731,41 @@ function App() {
 
       <aside className="context-pane">
         <h3>Retrieved Context</h3>
+        {latestDiagnostics && (
+          <div className="diagnostics-panel">
+            <div>
+              <span>Confidence</span>
+              <strong>{formatPercent(latestAssistant?.confidence_score)}</strong>
+            </div>
+            <div>
+              <span>Reranker</span>
+              <strong>{latestDiagnostics.reranker_applied ? 'Applied' : latestDiagnostics.reranker_skipped_reason || 'Skipped'}</strong>
+            </div>
+            <div>
+              <span>Candidates</span>
+              <strong>{latestDiagnostics.candidates_considered}</strong>
+            </div>
+            <div>
+              <span>Retrieval</span>
+              <strong>{Math.round(latestDiagnostics.retrieval_ms || 0)} ms</strong>
+            </div>
+          </div>
+        )}
         {contextCards.length === 0 ? (
           <p className="empty-context">Context cards appear here after a response with sources.</p>
         ) : (
           <div className="context-list">
             {contextCards.map((src, idx) => {
-              const score = typeof src.relevance_score === 'number' ? Math.round(src.relevance_score * 100) : null;
               return (
                 <article key={`${src.document}-${src.page}-${idx}`} className="context-card">
                   <h4>{src.document.replace('.pdf', '')}, Page {src.page}</h4>
-                  {score !== null && <p className="context-confidence">(Confidence: {score}%)</p>}
+                  {src.section && <p className="context-section">{src.section}</p>}
+                  <div className="score-grid">
+                    <span>Final {formatPercent(src.final_score ?? src.relevance_score)}</span>
+                    <span>Vector {formatPercent(src.vector_score)}</span>
+                    <span>Lexical {formatPercent(src.lexical_score)}</span>
+                    <span>BM25 {formatPercent(src.bm25_score)}</span>
+                  </div>
                   <p className="context-snippet">
                     {src.snippet?.trim() || 'Snippet unavailable.'}
                   </p>

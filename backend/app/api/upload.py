@@ -17,6 +17,8 @@ from app.services.ingestion.vision_enricher import enrich_blocks_with_vision, ge
 from app.services.query_cache import clear_query_cache
 from app.services.vector_store import (
     add_documents,
+    delete_indexed_document,
+    get_indexed_document,
     is_document_indexed,
     list_indexed_documents,
     register_indexed_document,
@@ -27,6 +29,7 @@ from app.models.schemas import (
     UploadBatchResponse,
     UploadItemResult,
     ResetKnowledgeBaseResponse,
+    DeleteKnowledgeBaseFileResponse,
 )
 from app.config import settings
 from app.utils.logger import get_logger
@@ -34,6 +37,90 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
+
+
+def _stored_upload_path(file_hash: str, filename: str) -> Path:
+    return Path(settings.upload_dir) / f"{file_hash[:12]}_{filename}"
+
+
+def _find_stored_upload(file_hash: str, filename: str, upload_path: str = "") -> Path | None:
+    if upload_path:
+        candidate = Path(upload_path)
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    expected = _stored_upload_path(file_hash, filename)
+    if expected.exists() and expected.is_file():
+        return expected
+
+    upload_dir = Path(settings.upload_dir)
+    matches = sorted(upload_dir.glob(f"{file_hash[:12]}_*.pdf")) if upload_dir.exists() else []
+    return matches[0] if matches else None
+
+
+def _delete_stored_upload(file_hash: str, filename: str, upload_path: str = "") -> bool:
+    stored_path = _find_stored_upload(file_hash, filename, upload_path)
+    if stored_path is None:
+        return False
+    stored_path.unlink(missing_ok=True)
+    return True
+
+
+def _prepare_chunks_for_indexing(
+    file_path: Path,
+    filename: str,
+    file_hash: str,
+    document_id: str,
+) -> tuple[list, str, int]:
+    chunks = []
+    vision_calls_used = 0
+    parsing_method = "legacy_pdf"
+
+    if settings.enable_docling:
+        try:
+            blocks = parse_document(str(file_path))
+            if settings.enable_vision_enrichment:
+                blocks = enrich_blocks_with_vision(blocks)
+                vision_calls_used = get_last_vision_calls_used()
+
+            chunks = chunk_structured_blocks(blocks)
+            parsing_method = "docling"
+            logger.info(
+                "Structured ingestion completed | file=%s blocks=%d chunks=%d vision_calls_used=%d",
+                filename,
+                len(blocks),
+                len(chunks),
+                vision_calls_used,
+            )
+        except Exception as docling_exc:
+            parsing_method = "legacy_pdf_fallback"
+            logger.warning(
+                "Structured ingestion failed; falling back to legacy parser | file=%s error=%s",
+                filename,
+                docling_exc,
+            )
+
+    if not chunks:
+        documents = load_pdf(file_path)
+        chunks = split_documents(documents)
+
+    if not chunks:
+        raise ValueError("Document contains no parseable text.")
+
+    indexed_at = int(time.time())
+    for idx, chunk in enumerate(chunks):
+        chunk.metadata.update(
+            {
+                "source": filename,
+                "file_hash": file_hash,
+                "document_id": document_id,
+                "parsing_method": parsing_method,
+                "chunk_index": idx,
+                "indexed_at": indexed_at,
+            }
+        )
+
+    return chunks, parsing_method, vision_calls_used
 
 
 @router.get(
@@ -86,6 +173,115 @@ async def reset_knowledge_base() -> ResetKnowledgeBaseResponse:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to reset knowledge base. Please try again.",
+        )
+
+
+@router.delete(
+    "/knowledge-base/files/{file_hash}",
+    response_model=DeleteKnowledgeBaseFileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Delete one indexed file",
+    description="Removes one document from FAISS, the document registry, and stored uploads.",
+)
+async def delete_knowledge_base_file(file_hash: str) -> DeleteKnowledgeBaseFileResponse:
+    try:
+        meta = get_indexed_document(file_hash)
+        if meta is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found.",
+            )
+
+        delete_result = delete_indexed_document(file_hash)
+        upload_deleted = _delete_stored_upload(
+            file_hash=file_hash,
+            filename=str(meta.get("filename", "")),
+            upload_path=str(meta.get("upload_path", "")),
+        )
+        clear_query_cache()
+        return DeleteKnowledgeBaseFileResponse(
+            file_hash=file_hash,
+            filename=str(meta.get("filename", "")),
+            chunks_deleted=int(delete_result.get("chunks_deleted", 0) or 0),
+            upload_deleted=upload_deleted,
+            message="Document deleted successfully.",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to delete indexed document '%s': %s", file_hash, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete document. Please try again.",
+        )
+
+
+@router.post(
+    "/knowledge-base/files/{file_hash}/reindex",
+    response_model=UploadItemResult,
+    status_code=status.HTTP_200_OK,
+    summary="Reindex one stored file",
+    description="Rebuilds chunks and vectors for a stored PDF without requiring another upload.",
+)
+async def reindex_knowledge_base_file(file_hash: str) -> UploadItemResult:
+    meta = get_indexed_document(file_hash)
+    if meta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    filename = str(meta.get("filename", ""))
+    stored_path = _find_stored_upload(
+        file_hash=file_hash,
+        filename=filename,
+        upload_path=str(meta.get("upload_path", "")),
+    )
+    if stored_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Stored PDF is missing. Upload the document again before reindexing.",
+        )
+
+    document_id = str(meta.get("document_id", "")) or hashlib.sha1(
+        f"{filename}:{file_hash}".encode("utf-8")
+    ).hexdigest()[:16]
+
+    try:
+        chunks, parsing_method, vision_calls_used = _prepare_chunks_for_indexing(
+            file_path=stored_path,
+            filename=filename,
+            file_hash=file_hash,
+            document_id=document_id,
+        )
+        delete_indexed_document(file_hash)
+        add_documents(chunks)
+        register_indexed_document(
+            file_hash=file_hash,
+            filename=filename,
+            chunk_count=len(chunks),
+            document_id=document_id,
+            parsing_method=parsing_method,
+            upload_path=str(stored_path),
+            upload_status="indexed",
+            vision_calls_used=vision_calls_used,
+        )
+        clear_query_cache()
+        return UploadItemResult(
+            filename=filename,
+            chunks_indexed=len(chunks),
+            status="success",
+            message="Document reindexed successfully.",
+            file_hash=file_hash,
+            document_id=document_id,
+            parsing_method=parsing_method,
+            vision_calls_used=vision_calls_used,
+        )
+    except Exception as exc:
+        logger.error("Failed to reindex document '%s': %s", file_hash, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reindex document. Please try again.",
         )
 
 
@@ -158,7 +354,7 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
 
             file_hash = hashlib.sha256(content).hexdigest()
             document_id = hashlib.sha1(f"{safe_filename}:{file_hash}".encode("utf-8")).hexdigest()[:16]
-            file_path = upload_dir / f"{file_hash[:12]}_{safe_filename}"
+            file_path = _stored_upload_path(file_hash, safe_filename)
             with open(file_path, "wb") as f:
                 f.write(content)
         except Exception as e:
@@ -174,57 +370,33 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
             continue
 
         if file_hash and is_document_indexed(file_hash):
+            existing = get_indexed_document(file_hash) or {}
             logger.info("Duplicate upload skipped for '%s' (hash=%s)", file.filename, file_hash[:12])
             if file_path is not None and file_path.exists():
                 os.remove(file_path)
             results.append(
                 UploadItemResult(
                     filename=safe_filename,
-                    chunks_indexed=0,
+                    chunks_indexed=int(existing.get("chunk_count", 0) or 0),
                     status="duplicate",
                     message="Duplicate document detected. Existing index entry was reused.",
+                    file_hash=file_hash,
+                    document_id=str(existing.get("document_id", document_id)),
+                    parsing_method=str(existing.get("parsing_method", "")) or None,
+                    vision_calls_used=int(existing.get("vision_calls_used", 0) or 0),
                 )
             )
             continue
 
         try:
-            chunks = []
-            vision_calls_used = 0
             chunking_start = time.perf_counter()
-
-            if settings.enable_docling:
-                try:
-                    blocks = parse_document(str(file_path))
-                    if settings.enable_vision_enrichment:
-                        blocks = enrich_blocks_with_vision(blocks)
-                        vision_calls_used = get_last_vision_calls_used()
-
-                    chunks = chunk_structured_blocks(blocks)
-                    logger.info(
-                        "Structured ingestion completed | file=%s blocks=%d chunks=%d vision_calls_used=%d",
-                        file.filename,
-                        len(blocks),
-                        len(chunks),
-                        vision_calls_used,
-                    )
-                except Exception as docling_exc:
-                    logger.warning(
-                        "Structured ingestion failed; falling back to legacy parser | file=%s error=%s",
-                        file.filename,
-                        docling_exc,
-                    )
-
-            if not chunks:
-                documents = load_pdf(file_path)
-                chunks = split_documents(documents)
-
+            chunks, parsing_method, vision_calls_used = _prepare_chunks_for_indexing(
+                file_path=file_path,
+                filename=safe_filename,
+                file_hash=file_hash,
+                document_id=document_id,
+            )
             chunking_elapsed = time.perf_counter() - chunking_start
-
-            if not chunks:
-                raise ValueError("Document contains no parseable text.")
-
-            for chunk in chunks:
-                chunk.metadata["source"] = safe_filename
 
             index_start = time.perf_counter()
             add_documents(chunks)
@@ -235,6 +407,10 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
                     filename=safe_filename,
                     chunk_count=len(chunks),
                     document_id=document_id,
+                    parsing_method=parsing_method,
+                    upload_path=str(file_path),
+                    upload_status="indexed",
+                    vision_calls_used=vision_calls_used,
                 )
 
             total_chunks_indexed += len(chunks)
@@ -253,6 +429,10 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
                     chunks_indexed=len(chunks),
                     status="success",
                     message="Document ingested successfully.",
+                    file_hash=file_hash,
+                    document_id=document_id,
+                    parsing_method=parsing_method,
+                    vision_calls_used=vision_calls_used,
                 )
             )
         except Exception as e:

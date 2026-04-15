@@ -114,17 +114,80 @@
   gap: 10px;
 }
 
+.kb-item {
+  border: 1px solid #d0d8e2;
+  background: #f4f7fa;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.kb-item-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
 .kb-item strong {
   display: block;
   font-size: 1.05rem;
   line-height: 1.1;
   color: #1f252d;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .kb-item span {
   color: #6f7988;
   font-size: 0.92rem;
+}
+
+.kb-meta,
+.kb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.kb-meta {
+  margin-top: 8px;
+}
+
+.kb-meta span {
+  border: 1px solid #cbd4df;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #ffffff;
+  color: #465366;
+  font-size: 0.75rem;
+}
+
+.kb-indexed-at {
+  margin: 7px 0 8px;
+  color: #6f7988;
+  font-size: 0.78rem;
+}
+
+.kb-actions button {
+  border: 1px solid #c9d3df;
+  background: #ffffff;
+  color: #2d3a4b;
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.kb-actions button.danger {
+  border-color: #d8b5b5;
+  color: #8d2f2f;
+}
+
+.kb-actions button:disabled {
+  opacity: 0.6;
 }
 
 .empty-kb {
@@ -314,6 +377,33 @@
   margin-bottom: 14px;
 }
 
+.diagnostics-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.diagnostics-panel div {
+  border: 1px solid #ccd5df;
+  border-radius: 8px;
+  background: #f6f8fa;
+  padding: 8px;
+}
+
+.diagnostics-panel span {
+  display: block;
+  color: #6c7686;
+  font-size: 0.76rem;
+  margin-bottom: 3px;
+}
+
+.diagnostics-panel strong {
+  color: #243142;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
 .context-list {
   display: flex;
   flex-direction: column;
@@ -343,6 +433,29 @@
   color: #394455;
   margin-bottom: 6px;
   font-weight: 600;
+}
+
+.context-section {
+  font-size: 0.85rem;
+  color: #4d5b6e;
+  margin-bottom: 7px;
+  overflow-wrap: anywhere;
+}
+
+.score-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.score-grid span {
+  border: 1px solid #d3dae3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #344154;
+  font-size: 0.75rem;
+  padding: 4px 6px;
 }
 
 .context-snippet {

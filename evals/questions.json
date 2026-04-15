@@ -4,34 +4,109 @@
     "question": "Summarize the leave policy.",
     "expected_sources": [],
     "expected_keywords": ["leave"],
-    "notes": "Replace expected_sources with known PDF filenames/pages after indexing your sample HR policy PDF."
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Replace expected_sources with the exact HR policy PDF filename and page after indexing your sample documents."
   },
   {
-    "id": "vendor-onboarding-steps",
-    "question": "What are the vendor onboarding steps?",
+    "id": "leave-eligibility",
+    "question": "Who is eligible for annual leave?",
     "expected_sources": [],
-    "expected_keywords": ["vendor", "onboarding"],
-    "notes": "Use this when your knowledge base includes procurement or vendor onboarding material."
-  },
-  {
-    "id": "sla-escalation-path",
-    "question": "Where is the SLA escalation path documented?",
-    "expected_sources": [],
-    "expected_keywords": ["sla", "escalation"],
-    "notes": "Add an expected source page once an SLA or support-process PDF is indexed."
+    "expected_keywords": ["eligible", "leave"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with an HR handbook or leave policy PDF."
   },
   {
     "id": "benefits-eligibility",
     "question": "Who is eligible for employee benefits?",
     "expected_sources": [],
     "expected_keywords": ["benefits", "eligible"],
-    "notes": "Useful for checking policy retrieval over benefits documents."
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with a benefits policy PDF."
   },
   {
-    "id": "security-policy",
+    "id": "vendor-onboarding-steps",
+    "question": "What are the vendor onboarding steps?",
+    "expected_sources": [],
+    "expected_keywords": ["vendor", "onboarding"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with a procurement or vendor onboarding PDF."
+  },
+  {
+    "id": "vendor-required-documents",
+    "question": "What documents are required before a vendor can be approved?",
+    "expected_sources": [],
+    "expected_keywords": ["vendor", "document"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Add source expectations after indexing vendor onboarding material."
+  },
+  {
+    "id": "sla-escalation-path",
+    "question": "Where is the SLA escalation path documented?",
+    "expected_sources": [],
+    "expected_keywords": ["sla", "escalation"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with an SLA or support process PDF."
+  },
+  {
+    "id": "security-access-control",
     "question": "What does the security policy require for access control?",
     "expected_sources": [],
     "expected_keywords": ["security", "access"],
-    "notes": "Useful for checking source grounding on security or compliance documents."
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with security or compliance material."
+  },
+  {
+    "id": "incident-reporting",
+    "question": "How should employees report a security incident?",
+    "expected_sources": [],
+    "expected_keywords": ["incident", "report"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with security operations or incident response PDFs."
+  },
+  {
+    "id": "data-retention",
+    "question": "What are the data retention requirements?",
+    "expected_sources": [],
+    "expected_keywords": ["data", "retention"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with compliance, privacy, or records management PDFs."
+  },
+  {
+    "id": "travel-reimbursement",
+    "question": "What expenses are reimbursable for business travel?",
+    "expected_sources": [],
+    "expected_keywords": ["travel", "reimburs"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1,
+    "notes": "Use this with travel or expense policy PDFs."
+  },
+  {
+    "id": "answerability-negative-control",
+    "question": "What is the office coffee machine serial number?",
+    "expected_sources": [],
+    "expected_keywords": ["not", "document"],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)"],
+    "min_confidence": 0.0,
+    "min_sources": 0,
+    "notes": "Negative control: keep or replace with a question that should not be answerable from your PDFs."
   }
 ]

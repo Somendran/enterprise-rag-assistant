@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,9 @@ def load_evals(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"Eval item {idx} must include id and question.")
         item.setdefault("expected_sources", [])
         item.setdefault("expected_keywords", [])
+        item.setdefault("expected_answer_regex", [])
+        item.setdefault("min_confidence", 0.0)
+        item.setdefault("min_sources", 0)
     return payload
 
 
@@ -88,6 +92,18 @@ def score_eval(item: dict[str, Any], payload: dict[str, Any]) -> EvalResult:
         for expected in item.get("expected_sources", [])
         if not any(source_matches(expected, actual) for actual in sources)
     ]
+    missing_patterns = [
+        pattern
+        for pattern in item.get("expected_answer_regex", [])
+        if not re.search(str(pattern), answer, re.IGNORECASE | re.MULTILINE)
+    ]
+    confidence = payload.get("confidence_score")
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        confidence_value = 0.0
+    min_confidence = float(item.get("min_confidence", 0.0) or 0.0)
+    min_sources = int(item.get("min_sources", 0) or 0)
 
     failures: list[str] = []
     if not answer.strip():
@@ -96,6 +112,12 @@ def score_eval(item: dict[str, Any], payload: dict[str, Any]) -> EvalResult:
         failures.append(f"missing keywords: {missing_keywords}")
     if missing_sources:
         failures.append(f"missing sources: {missing_sources}")
+    if missing_patterns:
+        failures.append(f"missing regex matches: {missing_patterns}")
+    if confidence_value < min_confidence:
+        failures.append(f"confidence {confidence_value:.3f} below {min_confidence:.3f}")
+    if len(sources) < min_sources:
+        failures.append(f"sources {len(sources)} below {min_sources}")
 
     if failures:
         return EvalResult(str(item["id"]), False, "; ".join(failures))
@@ -103,7 +125,7 @@ def score_eval(item: dict[str, Any], payload: dict[str, Any]) -> EvalResult:
     return EvalResult(
         str(item["id"]),
         True,
-        f"answer_chars={len(answer)} sources={len(sources)}",
+        f"answer_chars={len(answer)} sources={len(sources)} confidence={confidence_value:.3f}",
     )
 
 

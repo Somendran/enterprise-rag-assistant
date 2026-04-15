@@ -11,7 +11,9 @@ Retrieval-Augmented Generation assistant for local knowledge bases. It lets you 
 - Local-first generation through Ollama, with optional OpenAI generation.
 - Server-Sent Events (SSE) streaming for chat responses.
 - Source references, confidence diagnostics, and optional post-generation verification.
-- React + Vite frontend for upload, chat, reset, and retrieved-context review.
+- React + Vite frontend for upload, chat, document management, reset, and retrieved-context review.
+- Per-document delete/reindex operations for local FAISS maintenance.
+- RAG eval fixture and CI workflow for regression checks.
 - Optional API-key protection for backend routes.
 
 ## Architecture
@@ -103,6 +105,8 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 | `LOCAL_LLM_ENDPOINT` | Ollama generation endpoint. |
 | `LOCAL_LLM_MODEL` | Ollama model tag for local generation. |
 | `ENABLE_NEURAL_RERANKER` | Enables cross-encoder reranking. |
+| `RERANKER_MODEL_NAME` | Local cross-encoder model used by FlagEmbedding. |
+| `ENABLE_DOCLING` | Enables structured PDF parsing before the legacy parser fallback. |
 | `ENABLE_VERIFICATION` | Enables lightweight post-generation verification. |
 
 ## API Endpoints
@@ -110,6 +114,8 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 - `GET /health` - public health check.
 - `POST /upload` - ingest one or more PDF documents.
 - `GET /knowledge-base/files` - list indexed document metadata.
+- `DELETE /knowledge-base/files/{file_hash}` - remove one document from uploads, registry, and FAISS.
+- `POST /knowledge-base/files/{file_hash}/reindex` - rebuild chunks/vectors for one stored PDF.
 - `POST /knowledge-base/reset` - clear uploads and FAISS artifacts.
 - `POST /query` - run a non-streaming RAG query.
 - `POST /query/stream` - stream RAG output using SSE events.

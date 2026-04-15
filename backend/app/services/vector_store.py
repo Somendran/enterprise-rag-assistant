@@ -199,6 +199,10 @@ def register_indexed_document(
     filename: str,
     chunk_count: int,
     document_id: str,
+    parsing_method: str = "unknown",
+    upload_path: str = "",
+    upload_status: str = "indexed",
+    vision_calls_used: int = 0,
 ) -> None:
     """Persist hash and document metadata for duplicate prevention."""
     index_path = _index_path()
@@ -209,6 +213,10 @@ def register_indexed_document(
         "document_id": document_id,
         "embedding_model": settings.embedding_model,
         "indexed_at": int(time.time()),
+        "parsing_method": parsing_method,
+        "upload_path": upload_path,
+        "upload_status": upload_status,
+        "vision_calls_used": int(vision_calls_used or 0),
     }
     _write_doc_registry(index_path, registry)
 
@@ -225,14 +233,87 @@ def list_indexed_documents() -> list[dict[str, Any]]:
         items.append(
             {
                 "file_hash": file_hash,
+                "document_id": str(meta.get("document_id", "")),
                 "filename": str(meta.get("filename", "unknown")),
                 "chunk_count": int(meta.get("chunk_count", 0) or 0),
                 "indexed_at": int(meta.get("indexed_at", 0) or 0),
+                "parsing_method": str(meta.get("parsing_method", "unknown")),
+                "upload_status": str(meta.get("upload_status", "indexed")),
+                "vision_calls_used": int(meta.get("vision_calls_used", 0) or 0),
+                "embedding_model": str(meta.get("embedding_model", settings.embedding_model)),
             }
         )
 
     items.sort(key=lambda x: (x["filename"].lower(), -x["indexed_at"]))
     return items
+
+
+def get_indexed_document(file_hash: str) -> Optional[dict[str, Any]]:
+    """Return registry metadata for one document hash if present."""
+    index_path = _index_path()
+    registry = _read_doc_registry(index_path)
+    meta = registry.get(file_hash)
+    if not isinstance(meta, dict):
+        return None
+    return {
+        "file_hash": file_hash,
+        **meta,
+    }
+
+
+def delete_indexed_document(file_hash: str) -> dict[str, Any]:
+    """
+    Remove one document from FAISS and the document registry.
+
+    The stored upload file is intentionally left on disk so callers can choose
+    whether to reindex or fully delete the document.
+    """
+    global _store
+
+    with _write_lock:
+        index_path = _index_path()
+        registry = _read_doc_registry(index_path)
+        meta = registry.get(file_hash)
+        if not isinstance(meta, dict):
+            raise KeyError(f"Document not found: {file_hash}")
+
+        store = get_or_create_store()
+        chunks_deleted = 0
+        filename = str(meta.get("filename", ""))
+        document_id = str(meta.get("document_id", ""))
+
+        if store is not None:
+            docstore = getattr(store, "docstore", None)
+            doc_dict = getattr(docstore, "_dict", {}) if docstore is not None else {}
+            ids_to_delete: list[str] = []
+
+            for docstore_id, doc in doc_dict.items():
+                metadata = getattr(doc, "metadata", {}) or {}
+                if (
+                    metadata.get("file_hash") == file_hash
+                    or (document_id and metadata.get("document_id") == document_id)
+                    or (filename and metadata.get("source") == filename)
+                ):
+                    ids_to_delete.append(str(docstore_id))
+
+            if ids_to_delete:
+                delete_fn = getattr(store, "delete", None)
+                if not callable(delete_fn):
+                    raise RuntimeError("The active FAISS store does not support document deletion.")
+                delete_fn(ids=ids_to_delete)
+                chunks_deleted = len(ids_to_delete)
+                store.save_local(index_path)
+                _write_index_meta(index_path, _get_index_dimension(store))
+
+        registry.pop(file_hash, None)
+        _write_doc_registry(index_path, registry)
+
+        return {
+            "file_hash": file_hash,
+            "filename": filename,
+            "chunks_deleted": chunks_deleted,
+            "upload_path": str(meta.get("upload_path", "")),
+        }
 
 
 def get_or_create_store() -> FAISS:

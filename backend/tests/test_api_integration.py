@@ -12,8 +12,15 @@ vector_store_stub = types.ModuleType("app.services.vector_store")
 vector_store_stub.load_store = lambda: None
 vector_store_stub.add_documents = lambda chunks: None
 vector_store_stub.is_document_indexed = lambda file_hash: False
+vector_store_stub.get_indexed_document = lambda file_hash: None
 vector_store_stub.list_indexed_documents = lambda: []
 vector_store_stub.register_indexed_document = lambda **kwargs: None
+vector_store_stub.delete_indexed_document = lambda file_hash: {
+    "file_hash": file_hash,
+    "filename": "handbook.pdf",
+    "chunks_deleted": 0,
+    "upload_path": "",
+}
 vector_store_stub.reset_vector_store = lambda: True
 sys.modules.setdefault("app.services.vector_store", vector_store_stub)
 
@@ -40,6 +47,7 @@ query_cache_stub.clear_query_cache = lambda: None
 sys.modules.setdefault("app.services.query_cache", query_cache_stub)
 
 from app.api import query as query_module
+from app.api import upload as upload_module
 from app.config import Settings, settings
 from app.main import app
 
@@ -49,10 +57,16 @@ class ApiIntegrationTests(unittest.TestCase):
         self.client = TestClient(app)
         self.original_api_key = settings.app_api_key
         self.original_run_rag_pipeline = query_module.run_rag_pipeline
+        self.original_get_indexed_document = upload_module.get_indexed_document
+        self.original_delete_indexed_document = upload_module.delete_indexed_document
+        self.original_delete_stored_upload = upload_module._delete_stored_upload
 
     def tearDown(self):
         settings.app_api_key = self.original_api_key
         query_module.run_rag_pipeline = self.original_run_rag_pipeline
+        upload_module.get_indexed_document = self.original_get_indexed_document
+        upload_module.delete_indexed_document = self.original_delete_indexed_document
+        upload_module._delete_stored_upload = self.original_delete_stored_upload
 
     def test_health_is_public(self):
         settings.app_api_key = "secret"
@@ -74,6 +88,37 @@ class ApiIntegrationTests(unittest.TestCase):
         settings.app_api_key = "secret"
         response = self.client.post("/knowledge-base/reset")
         self.assertEqual(response.status_code, 401)
+
+    def test_delete_document_returns_404_for_missing_hash(self):
+        settings.app_api_key = ""
+        upload_module.get_indexed_document = lambda file_hash: None
+
+        response = self.client.delete("/knowledge-base/files/missing")
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_document_removes_index_and_upload(self):
+        settings.app_api_key = ""
+        upload_module.get_indexed_document = lambda file_hash: {
+            "file_hash": file_hash,
+            "filename": "handbook.pdf",
+            "upload_path": "",
+        }
+        upload_module.delete_indexed_document = lambda file_hash: {
+            "file_hash": file_hash,
+            "filename": "handbook.pdf",
+            "chunks_deleted": 3,
+            "upload_path": "",
+        }
+        upload_module._delete_stored_upload = lambda **kwargs: True
+
+        response = self.client.delete("/knowledge-base/files/abc123")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["file_hash"], "abc123")
+        self.assertEqual(payload["chunks_deleted"], 3)
+        self.assertTrue(payload["upload_deleted"])
 
     def test_upload_rejects_bad_pdf_bytes_before_ingestion(self):
         settings.app_api_key = ""

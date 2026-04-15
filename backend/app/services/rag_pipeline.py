@@ -256,7 +256,10 @@ def _base_retrieval_signal(chunks: list[RetrievedChunk]) -> float:
     return sum(values) / len(values)
 
 
-def _extract_sources(chunks: list[RetrievedChunk]) -> List[SourceReference]:
+def _extract_sources(
+    chunks: list[RetrievedChunk],
+    reranker_applied: bool = False,
+) -> List[SourceReference]:
     """
     Deduplicate the source references from the retrieved chunks.
     A (document, page) pair is unique by definition.
@@ -277,6 +280,15 @@ def _extract_sources(chunks: list[RetrievedChunk]) -> List[SourceReference]:
                     page=page,
                     relevance_score=round(float(chunk.final_score), 4),
                     snippet=snippet or None,
+                    section=(
+                        str(chunk.document.metadata.get("section") or chunk.document.metadata.get("section_hint") or "")
+                        or None
+                    ),
+                    vector_score=round(float(chunk.vector_confidence), 4),
+                    lexical_score=round(float(chunk.lexical_score), 4),
+                    bm25_score=round(float(chunk.bm25_score), 4),
+                    final_score=round(float(chunk.final_score), 4),
+                    reranker_applied=reranker_applied,
                 )
             )
     return sources
@@ -898,7 +910,10 @@ def run_rag_pipeline(
         logger.info("LLM path used=%s question='%s'", model_used, question[:80])
 
     # ── Step 5: Extract sources ───────────────────────────────────────────────
-    sources = _extract_sources(chunks_for_generation)
+    sources = _extract_sources(
+        chunks_for_generation,
+        reranker_applied=debug.reranker_applied,
+    )
     total_pipeline_ms = (time.perf_counter() - start_time) * 1000.0
     diagnostics = RetrievalDiagnostics(
         query_variants_used=debug.query_variants_used,
