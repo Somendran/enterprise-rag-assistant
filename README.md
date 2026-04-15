@@ -11,11 +11,11 @@ Retrieval-Augmented Generation assistant for local knowledge bases. It lets you 
 - Local-first generation through Ollama, with optional OpenAI generation.
 - Server-Sent Events (SSE) streaming for chat responses.
 - Source references, confidence diagnostics, and optional post-generation verification.
-- React + Vite frontend for upload, chat, document management, source chunk review, feedback, reset, and retrieved-context review.
+- React + Vite frontend for background upload jobs, chat history, document management, source chunk review, feedback, reset, and retrieved-context review.
 - Per-document delete/reindex operations for local FAISS maintenance.
 - SQLite metadata store for document registry, answer feedback, and admin/debug summaries.
 - Runtime model health checks for embeddings, Docling, reranker, Ollama, and OpenAI config.
-- RAG eval fixture and CI workflow for regression checks.
+- RAG eval fixture, background eval runs, dashboard, and CI workflow for regression checks.
 - Local sample document generator for repeatable demos.
 - Optional API-key protection for backend routes.
 
@@ -134,6 +134,8 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 
 - `GET /health` - public health check.
 - `POST /upload` - ingest one or more PDF documents.
+- `POST /upload/jobs` - upload PDFs and ingest them in the background.
+- `GET /upload/jobs/{job_id}` - poll ingestion job progress.
 - `GET /knowledge-base/files` - list indexed document metadata.
 - `GET /knowledge-base/files/{file_hash}/chunks` - inspect stored chunks for a document.
 - `DELETE /knowledge-base/files/{file_hash}` - remove one document from uploads, registry, and FAISS.
@@ -142,6 +144,12 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 - `POST /query` - run a non-streaming RAG query.
 - `POST /query/stream` - stream RAG output using SSE events.
 - `POST /feedback` - record answer feedback.
+- `GET /chat/sessions` - list saved chat sessions.
+- `POST /chat/sessions` - create a saved chat session.
+- `GET /chat/sessions/{session_id}/messages` - load chat history.
+- `POST /chat/sessions/{session_id}/messages` - store a chat message.
+- `POST /evals/runs` - start a background eval run.
+- `GET /evals/runs` - list eval runs for the dashboard.
 - `GET /admin/overview` - local admin/debug summary.
 - `GET /health/models` - runtime model/dependency health check.
 

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import ReactMarkdown from 'react-markdown';
 import {
@@ -96,6 +96,18 @@ interface DocumentChunksResponse {
   file_hash: string;
   filename: string;
   chunks: DocumentChunk[];
+  focus_chunk_index?: number | null;
+}
+
+interface IngestionJobStatus {
+  job_id: string;
+  status: string;
+  stage: string;
+  message: string;
+  total_files: number;
+  processed_files: number;
+  total_chunks_indexed: number;
+  results: UploadItemResult[];
 }
 
 interface ModelHealthItem {
@@ -108,6 +120,8 @@ interface AdminOverview {
   document_count: number;
   chunk_count: number;
   feedback_count: number;
+  chat_session_count: number;
+  eval_run_count: number;
   recent_feedback: Array<{
     id: number;
     created_at: number;
@@ -122,6 +136,38 @@ interface AdminOverview {
   docling_enabled: boolean;
   reranker_enabled: boolean;
   openai_enabled: boolean;
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface ChatMessageApiItem {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: Source[];
+  confidence_score?: number | null;
+  confidence_level?: Message['confidence_level'];
+  diagnostics?: RetrievalDiagnostics | null;
+}
+
+interface EvalRun {
+  id: string;
+  created_at: number;
+  status: string;
+  total: number;
+  passed: number;
+  failed: number;
+  message: string;
+  results: Array<{
+    eval_id: string;
+    passed: boolean;
+    message: string;
+  }>;
 }
 
 interface KnowledgeBaseFileApiItem {
@@ -244,6 +290,10 @@ function formatPercent(value?: number | null): string {
   return `${Math.round(value * 100)}%`;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputTitle, setInputTitle] = useState('');
@@ -261,6 +311,10 @@ function App() {
   const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
   const [modelHealth, setModelHealth] = useState<ModelHealthItem[]>([]);
   const [isLoadingAdmin, setIsLoadingAdmin] = useState(false);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [evalRuns, setEvalRuns] = useState<EvalRun[]>([]);
+  const [isRunningEval, setIsRunningEval] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryInputRef = useRef<HTMLInputElement>(null);
@@ -332,6 +386,101 @@ function App() {
     void loadIndexedFiles();
   }, [loadIndexedFiles]);
 
+  const loadChatSessions = useCallback(async () => {
+    try {
+      const response = await axios.get<{ sessions: ChatSession[] }>(
+        `${API_BASE}/chat/sessions`,
+        { headers: API_HEADERS }
+      );
+      setChatSessions(response.data?.sessions || []);
+    } catch (error) {
+      console.warn('Failed to load chat sessions.', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadChatSessions();
+  }, [loadChatSessions]);
+
+  const ensureChatSession = async (): Promise<string> => {
+    if (activeSessionId) return activeSessionId;
+    const response = await axios.post<ChatSession>(
+      `${API_BASE}/chat/sessions`,
+      { title: 'New chat' },
+      { headers: API_HEADERS }
+    );
+    setActiveSessionId(response.data.id);
+    setChatSessions((prev) => [response.data, ...prev]);
+    return response.data.id;
+  };
+
+  const saveChatMessage = async (sessionId: string, message: Message) => {
+    try {
+      await axios.post(
+        `${API_BASE}/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+        {
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          sources: message.sources || [],
+          diagnostics: message.diagnostics || undefined,
+          confidence_score: message.confidence_score,
+          confidence_level: message.confidence_level,
+        },
+        { headers: API_HEADERS }
+      );
+      void loadChatSessions();
+    } catch (error) {
+      console.warn('Failed to save chat message.', error);
+    }
+  };
+
+  const loadChatMessages = async (session: ChatSession) => {
+    try {
+      const response = await axios.get<{ messages: ChatMessageApiItem[] }>(
+        `${API_BASE}/chat/sessions/${encodeURIComponent(session.id)}/messages`,
+        { headers: API_HEADERS }
+      );
+      const loaded = (response.data?.messages || []).map((item) => ({
+        id: item.id,
+        role: item.role,
+        content: item.content,
+        sources: item.sources,
+        confidence_score: item.confidence_score,
+        confidence_level: item.confidence_level,
+        diagnostics: item.diagnostics,
+      }));
+      setActiveSessionId(session.id);
+      setMessages(loaded);
+      setFeedbackStatus(null);
+    } catch (error) {
+      console.warn('Failed to load chat messages.', error);
+    }
+  };
+
+  const startNewChat = async () => {
+    const response = await axios.post<ChatSession>(
+      `${API_BASE}/chat/sessions`,
+      { title: 'New chat' },
+      { headers: API_HEADERS }
+    );
+    setActiveSessionId(response.data.id);
+    setChatSessions((prev) => [response.data, ...prev]);
+    setMessages([]);
+  };
+
+  const loadEvalRuns = useCallback(async () => {
+    try {
+      const response = await axios.get<{ runs: EvalRun[] }>(
+        `${API_BASE}/evals/runs`,
+        { headers: API_HEADERS }
+      );
+      setEvalRuns(response.data?.runs || []);
+    } catch (error) {
+      console.warn('Failed to load eval runs.', error);
+    }
+  }, []);
+
   const loadAdminDebug = useCallback(async () => {
     setIsLoadingAdmin(true);
     try {
@@ -341,12 +490,39 @@ function App() {
       ]);
       setAdminOverview(overviewResponse.data);
       setModelHealth(healthResponse.data?.checks || []);
+      await loadEvalRuns();
     } catch (error) {
       console.warn('Failed to load admin/debug data.', error);
     } finally {
       setIsLoadingAdmin(false);
     }
-  }, []);
+  }, [loadEvalRuns]);
+
+  const startEvalRun = async () => {
+    setIsRunningEval(true);
+    try {
+      const response = await axios.post<{ run_id: string }>(
+        `${API_BASE}/evals/runs`,
+        undefined,
+        { headers: API_HEADERS }
+      );
+      const runId = response.data.run_id;
+      for (let i = 0; i < 120; i += 1) {
+        const runResponse = await axios.get<EvalRun>(
+          `${API_BASE}/evals/runs/${encodeURIComponent(runId)}`,
+          { headers: API_HEADERS }
+        );
+        setEvalRuns((prev) => [runResponse.data, ...prev.filter((run) => run.id !== runId)]);
+        if (runResponse.data.status !== 'running') break;
+        await delay(1500);
+      }
+      void loadAdminDebug();
+    } catch (error) {
+      console.warn('Failed to run evals.', error);
+    } finally {
+      setIsRunningEval(false);
+    }
+  };
 
   const uploadFiles = async (files: File[]) => {
     if (!files.length) return;
@@ -365,7 +541,7 @@ function App() {
     pdfFiles.forEach((file) => formData.append('files', file));
 
     try {
-      const response = await axios.post<UploadBatchResponse>(`${API_BASE}/upload`, formData, {
+      const response = await axios.post<{ job_id: string }>(`${API_BASE}/upload/jobs`, formData, {
         headers: {
           ...API_HEADERS,
           'Content-Type': 'multipart/form-data',
@@ -380,7 +556,35 @@ function App() {
           ]);
         },
       });
-      const data = response.data;
+      const jobId = response.data.job_id;
+      let data: UploadBatchResponse = {
+        files: [],
+        total_files: pdfFiles.length,
+        processed_files: 0,
+        total_chunks_indexed: 0,
+      };
+      for (let i = 0; i < 720; i += 1) {
+        const jobResponse = await axios.get<IngestionJobStatus>(
+          `${API_BASE}/upload/jobs/${encodeURIComponent(jobId)}`,
+          { headers: API_HEADERS }
+        );
+        const job = jobResponse.data;
+        setUploadStatus(job.message || `${job.stage}: ${job.status}`);
+        setUploadSteps([
+          'Uploaded PDFs',
+          `${job.stage || 'processing'}: ${job.status}`,
+          `Processed ${job.processed_files}/${job.total_files} file(s)`,
+          `Indexed ${job.total_chunks_indexed} chunks`,
+        ]);
+        data = {
+          files: job.results,
+          total_files: job.total_files,
+          processed_files: job.processed_files,
+          total_chunks_indexed: job.total_chunks_indexed,
+        };
+        if (job.status === 'completed' || job.status === 'failed') break;
+        await delay(1500);
+      }
       const totalFiles = Number(data?.total_files ?? pdfFiles.length);
       const processedFiles = Number(data?.processed_files ?? 0);
       const totalChunks = Number(data?.total_chunks_indexed ?? 0);
@@ -455,8 +659,11 @@ function App() {
     e.preventDefault();
     if (!inputTitle.trim() || isQuerying) return;
 
+    const sessionId = await ensureChatSession();
     const userMsg: Message = { id: Date.now().toString(), role: 'user', content: inputTitle };
     const assistantId = (Date.now() + 1).toString();
+    let assistantDraft = '';
+    let finalAssistant: Message | null = null;
     shouldAutoScrollRef.current = true;
     setMessages(prev => [
       ...prev,
@@ -465,6 +672,7 @@ function App() {
     ]);
     setInputTitle('');
     setIsQuerying(true);
+    void saveChatMessage(sessionId, userMsg);
 
     try {
       const response = await fetch(`${API_BASE}/query/stream`, {
@@ -487,6 +695,7 @@ function App() {
 
       const applyChunk = (text: string) => {
         if (!text) return;
+        assistantDraft += text;
         setMessages(prev => prev.map(msg => (
           msg.id === assistantId
             ? { ...msg, content: `${msg.content}${text}` }
@@ -495,6 +704,15 @@ function App() {
       };
 
       const applyDone = (payload: StreamDonePayload) => {
+        finalAssistant = {
+          id: assistantId,
+          role: 'assistant',
+          content: payload.answer || assistantDraft,
+          sources: payload.sources,
+          confidence_score: payload.confidence_score,
+          confidence_level: payload.confidence_level,
+          diagnostics: payload.diagnostics,
+        };
         setMessages(prev => prev.map(msg => (
           msg.id === assistantId
             ? {
@@ -533,6 +751,10 @@ function App() {
             throw new Error(String(payload.detail || 'Streaming query failed'));
           }
         }
+      }
+
+      if (finalAssistant) {
+        void saveChatMessage(sessionId, finalAssistant);
       }
     } catch (error) {
       console.error("Query error:", error);
@@ -639,12 +861,18 @@ function App() {
     }
   };
 
-  const openDocumentChunks = async (fileHash: string | null | undefined) => {
+  const openDocumentChunks = async (
+    fileHash: string | null | undefined,
+    focusChunkIndex?: number | null,
+  ) => {
     if (!fileHash) return;
     setIsLoadingChunks(true);
     try {
+      const query = typeof focusChunkIndex === 'number'
+        ? `?focus_chunk_index=${focusChunkIndex}&neighbor_window=2`
+        : '';
       const response = await axios.get<DocumentChunksResponse>(
-        `${API_BASE}/knowledge-base/files/${encodeURIComponent(fileHash)}/chunks`,
+        `${API_BASE}/knowledge-base/files/${encodeURIComponent(fileHash)}/chunks${query}`,
         { headers: API_HEADERS }
       );
       setSelectedChunks(response.data);
@@ -658,7 +886,7 @@ function App() {
 
   const openSourceChunks = async (source: Source) => {
     const fileHash = source.file_hash || knowledgeFiles.find((file) => file.filename === source.document)?.fileHash;
-    await openDocumentChunks(fileHash);
+    await openDocumentChunks(fileHash, source.chunk_index);
   };
 
   const submitFeedback = async (
@@ -709,6 +937,29 @@ function App() {
         <div className="brand-block">
           <h1>RAGiT</h1>
           <p>Grounded knowledge workspace</p>
+        </div>
+
+        <div className="sessions-panel">
+          <div className="admin-header">
+            <h2>Chats</h2>
+            <button type="button" onClick={() => void startNewChat()}>New</button>
+          </div>
+          {chatSessions.length === 0 ? (
+            <p className="empty-kb">No saved chats yet.</p>
+          ) : (
+            <div className="session-list">
+              {chatSessions.slice(0, 6).map((session) => (
+                <button
+                  key={session.id}
+                  type="button"
+                  className={session.id === activeSessionId ? 'active' : ''}
+                  onClick={() => void loadChatMessages(session)}
+                >
+                  {session.title || 'New chat'}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div
@@ -830,6 +1081,8 @@ function App() {
               <span>{adminOverview.document_count} docs</span>
               <span>{adminOverview.chunk_count} chunks</span>
               <span>{adminOverview.feedback_count} feedback</span>
+              <span>{adminOverview.chat_session_count} chats</span>
+              <span>{adminOverview.eval_run_count} evals</span>
               <span>Docling {adminOverview.docling_enabled ? 'on' : 'off'}</span>
               <span>Reranker {adminOverview.reranker_enabled ? 'on' : 'off'}</span>
             </div>
@@ -846,6 +1099,18 @@ function App() {
               ))}
             </div>
           )}
+          <div className="eval-panel">
+            <button type="button" onClick={() => void startEvalRun()} disabled={isRunningEval}>
+              {isRunningEval ? <Loader2 size={13} className="animate-spin" /> : <FileSearch size={13} />}
+              Run evals
+            </button>
+            {evalRuns.slice(0, 3).map((run) => (
+              <div key={run.id} className="eval-run">
+                <strong>{run.status}: {run.passed}/{run.total}</strong>
+                <span>{run.message || `${run.failed} failed`}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </aside>
 
@@ -1006,8 +1271,11 @@ function App() {
             {selectedChunks.chunks.length === 0 ? (
               <p className="empty-context">No chunks found for this document.</p>
             ) : (
-              selectedChunks.chunks.slice(0, 12).map((chunk) => (
-                <article key={chunk.id} className="chunk-item">
+              selectedChunks.chunks.map((chunk) => (
+                <article
+                  key={chunk.id}
+                  className={`chunk-item ${selectedChunks.focus_chunk_index === chunk.chunk_index ? 'focused' : ''}`}
+                >
                   <strong>Page {chunk.page || 'n/a'} · Chunk {chunk.chunk_index}</strong>
                   {chunk.section && <span>{chunk.section}</span>}
                   <p>{chunk.content}</p>

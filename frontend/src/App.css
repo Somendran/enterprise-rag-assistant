@@ -203,6 +203,7 @@
   font-size: 0.95rem;
 }
 
+.sessions-panel,
 .admin-panel {
   margin-top: 16px;
   border-top: 1px solid #d3dae2;
@@ -225,7 +226,9 @@
 .admin-header button,
 .source-view-btn,
 .chunk-viewer-header button,
-.feedback-row button {
+.feedback-row button,
+.session-list button,
+.eval-panel button {
   border: 1px solid #c9d3df;
   background: #ffffff;
   color: #2d3a4b;
@@ -236,6 +239,24 @@
   gap: 5px;
   font-size: 0.78rem;
   font-weight: 600;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-list button {
+  width: 100%;
+  justify-content: flex-start;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.session-list button.active {
+  border-color: #8bb5dc;
+  background: #f6fbff;
 }
 
 .admin-stats,
@@ -278,6 +299,27 @@
 
 .health-item.error {
   border-color: #d8b5b5;
+}
+
+.eval-panel {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.eval-run {
+  border: 1px solid #ccd5df;
+  border-radius: 8px;
+  background: #f6f8fa;
+  padding: 7px;
+}
+
+.eval-run strong,
+.eval-run span {
+  display: block;
+  color: #344154;
+  font-size: 0.78rem;
 }
 
 .workspace-pane {
@@ -597,6 +639,11 @@
   background: #f6f8fa;
   padding: 10px;
   margin-bottom: 8px;
+}
+
+.chunk-item.focused {
+  border-color: #2f77da;
+  background: #f6fbff;
 }
 
 .chunk-item strong,

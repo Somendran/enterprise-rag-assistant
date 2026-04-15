@@ -315,7 +315,11 @@ def delete_indexed_document(file_hash: str) -> dict[str, Any]:
         }
 
 
-def list_document_chunks(file_hash: str) -> list[dict[str, Any]]:
+def list_document_chunks(
+    file_hash: str,
+    focus_chunk_index: int | None = None,
+    neighbor_window: int = 0,
+) -> list[dict[str, Any]]:
     """Return all stored chunks for one indexed document."""
     store = get_or_create_store()
     if store is None:
@@ -341,6 +345,14 @@ def list_document_chunks(file_hash: str) -> list[dict[str, Any]]:
         )
 
     chunks.sort(key=lambda item: (int(item.get("page", 0)), int(item.get("chunk_index", 0))))
+    if focus_chunk_index is not None and neighbor_window > 0:
+        low = int(focus_chunk_index) - int(neighbor_window)
+        high = int(focus_chunk_index) + int(neighbor_window)
+        return [
+            item
+            for item in chunks
+            if low <= int(item.get("chunk_index", 0)) <= high
+        ]
     return chunks
 
 

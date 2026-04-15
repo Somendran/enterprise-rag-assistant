@@ -146,7 +146,7 @@ class ApiIntegrationTests(unittest.TestCase):
             "file_hash": file_hash,
             "filename": "handbook.pdf",
         }
-        upload_module.list_document_chunks = lambda file_hash: [
+        upload_module.list_document_chunks = lambda file_hash, **kwargs: [
             {
                 "id": "chunk-1",
                 "content": "Leave policy text",

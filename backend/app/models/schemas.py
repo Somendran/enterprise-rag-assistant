@@ -45,6 +45,30 @@ class UploadBatchResponse(BaseModel):
     message: str = Field(default="Upload completed.")
 
 
+class IngestionJobResponse(BaseModel):
+    """Returned when a background ingestion job is created."""
+
+    job_id: str
+    status: str
+    stage: str = ""
+    message: str = ""
+
+
+class IngestionJobStatusResponse(BaseModel):
+    """Current status for a background ingestion job."""
+
+    job_id: str
+    status: str
+    stage: str = ""
+    message: str = ""
+    total_files: int = 0
+    processed_files: int = 0
+    total_chunks_indexed: int = 0
+    results: List[UploadItemResult] = Field(default_factory=list)
+    created_at: int = 0
+    updated_at: int = 0
+
+
 class ResetKnowledgeBaseResponse(BaseModel):
     """Returned after knowledge base reset completes."""
 
@@ -100,6 +124,7 @@ class DocumentChunksResponse(BaseModel):
     file_hash: str = Field(..., description="Document hash.")
     filename: str = Field(default="", description="Document filename.")
     chunks: List[DocumentChunkItem] = Field(default_factory=list)
+    focus_chunk_index: Optional[int] = None
 
 
 # ── /query ───────────────────────────────────────────────────────────────────
@@ -237,6 +262,8 @@ class AdminOverviewResponse(BaseModel):
     document_count: int
     chunk_count: int
     feedback_count: int
+    chat_session_count: int = 0
+    eval_run_count: int = 0
     recent_feedback: List[dict[str, Any]] = Field(default_factory=list)
     metadata_db_path: str
     embedding_model: str
@@ -244,3 +271,71 @@ class AdminOverviewResponse(BaseModel):
     docling_enabled: bool
     reranker_enabled: bool
     openai_enabled: bool
+
+
+class ChatSessionCreateRequest(BaseModel):
+    title: str = Field(default="New chat", max_length=120)
+
+
+class ChatSessionItem(BaseModel):
+    id: str
+    title: str
+    created_at: int
+    updated_at: int
+
+
+class ChatSessionsResponse(BaseModel):
+    sessions: List[ChatSessionItem] = Field(default_factory=list)
+
+
+class ChatMessageRequest(BaseModel):
+    id: Optional[str] = None
+    role: str
+    content: str
+    sources: List[SourceReference] = Field(default_factory=list)
+    diagnostics: Optional[RetrievalDiagnostics] = None
+    confidence_score: Optional[float] = None
+    confidence_level: Optional[str] = None
+
+
+class ChatMessageItem(BaseModel):
+    id: str
+    session_id: str
+    role: str
+    content: str
+    created_at: int
+    sources: List[SourceReference] = Field(default_factory=list)
+    diagnostics: Optional[RetrievalDiagnostics] = None
+    confidence_score: Optional[float] = None
+    confidence_level: Optional[str] = None
+
+
+class ChatMessagesResponse(BaseModel):
+    messages: List[ChatMessageItem] = Field(default_factory=list)
+
+
+class EvalRunCreateResponse(BaseModel):
+    run_id: str
+    status: str
+    total: int = 0
+
+
+class EvalRunResultItem(BaseModel):
+    eval_id: str
+    passed: bool
+    message: str
+
+
+class EvalRunItem(BaseModel):
+    id: str
+    created_at: int
+    status: str
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    message: str = ""
+    results: List[EvalRunResultItem] = Field(default_factory=list)
+
+
+class EvalRunsResponse(BaseModel):
+    runs: List[EvalRunItem] = Field(default_factory=list)
