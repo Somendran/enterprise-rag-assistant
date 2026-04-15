@@ -114,10 +114,10 @@ class ApiIntegrationTests(unittest.TestCase):
 class ProductionConfigTests(unittest.TestCase):
     def test_api_key_is_required_in_production(self):
         with self.assertRaises(ValueError):
-            Settings(app_env="production", app_api_key="", google_api_key="")
+            Settings(app_env="production", app_api_key="")
 
     def test_api_key_can_be_empty_in_development(self):
-        settings_obj = Settings(app_env="development", app_api_key="", google_api_key="")
+        settings_obj = Settings(app_env="development", app_api_key="")
         self.assertEqual(settings_obj.app_env, "development")
 
 

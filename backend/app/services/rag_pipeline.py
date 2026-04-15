@@ -602,7 +602,7 @@ def run_rag_pipeline(
         1. Retrieve top-k relevant chunks from the vector store.
         2. Format chunks into a context block.
         3. Inject context + question into the strict QA prompt.
-        4. Call the Gemini LLM and extract the answer.
+        4. Call the configured LLM and extract the answer.
         5. Return (answer, deduplicated source list).
 
     Args:

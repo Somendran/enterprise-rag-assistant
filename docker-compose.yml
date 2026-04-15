@@ -9,8 +9,13 @@ services:
       APP_ENV: ${APP_ENV:-development}
       APP_API_KEY: ${APP_API_KEY:-}
       ALLOWED_CORS_ORIGINS: ${ALLOWED_CORS_ORIGINS:-http://localhost:5173,http://localhost:8080}
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hash}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
       UPLOAD_DIR: /app/data/uploads
       FAISS_INDEX_PATH: /app/data/faiss_index
+      ENABLE_DOCLING: ${ENABLE_DOCLING:-false}
+      ENABLE_NEURAL_RERANKER: ${ENABLE_NEURAL_RERANKER:-false}
+      ENABLE_VISION_ENRICHMENT: ${ENABLE_VISION_ENRICHMENT:-false}
       LOCAL_LLM_ENDPOINT: ${LOCAL_LLM_ENDPOINT:-http://host.docker.internal:11434/api/generate}
       LOCAL_VISION_ENDPOINT: ${LOCAL_VISION_ENDPOINT:-http://host.docker.internal:11434/api/chat}
     ports:

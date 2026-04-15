@@ -8,7 +8,7 @@ Retrieval-Augmented Generation assistant for local knowledge bases. It lets you 
 - Safer upload handling with simple filename validation, PDF byte checks, and configurable upload size limits.
 - Hybrid retrieval over FAISS-backed vectors plus lexical/BM25-style signals.
 - Optional neural reranking with FlagEmbedding.
-- Local-first generation through Ollama, with optional OpenAI or Gemini paths.
+- Local-first generation through Ollama, with optional OpenAI generation.
 - Server-Sent Events (SSE) streaming for chat responses.
 - Source references, confidence diagnostics, and optional post-generation verification.
 - React + Vite frontend for upload, chat, reset, and retrieved-context review.
@@ -26,14 +26,14 @@ graph TD
     F -->|Embeddings| G[(FAISS Vector Store)]
     E -->|Hybrid Search| G
     E -->|Context and Prompt| H[LLM Generation]
-    H -->|OpenAI / Gemini / Ollama| I[Streamed Answer]
+    H -->|OpenAI / Ollama| I[Streamed Answer]
     I -->|Sources and Diagnostics| C
 ```
 
 ## Tech Stack
 
 - Backend: FastAPI, LangChain, FAISS, pdfplumber, Docling
-- AI/models: Ollama, OpenAI, Gemini, HuggingFace sentence-transformers
+- AI/models: Ollama, OpenAI, HuggingFace sentence-transformers
 - Frontend: React, TypeScript, Vite
 - Storage: local filesystem uploads and FAISS index persistence
 
@@ -88,6 +88,17 @@ The compose setup persists uploads and FAISS data in the `backend-data` Docker v
 
 Avoid sharing `docker compose config` output when real secrets are present because Compose expands values from `backend/.env`.
 
+The backend Docker image uses `backend/requirements.docker.txt`, a slimmer dependency set that disables Docling, neural reranking, and HuggingFace/PyTorch embeddings by default to keep builds manageable. Docker uses `EMBEDDING_BACKEND=hash`, a lightweight deterministic embedding backend that is useful for demos and CI but less semantically accurate than local HuggingFace embeddings. Local development can still use the full `backend/requirements.txt`.
+
+To enable the heavier Docker path, add the missing optional packages to `backend/requirements.docker.txt` and set:
+
+```powershell
+$env:EMBEDDING_BACKEND='local_hf'
+$env:ENABLE_DOCLING='true'
+$env:ENABLE_NEURAL_RERANKER='true'
+docker compose up --build
+```
+
 For a production-like Docker run, set matching API keys for backend and frontend build-time config:
 
 ```powershell
@@ -126,11 +137,11 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 | `APP_API_KEY` | Optional local API key; required in production. |
 | `ALLOWED_CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS. |
 | `MAX_UPLOAD_SIZE_MB` | Maximum PDF upload size handled by the app. |
+| `EMBEDDING_BACKEND` | `local_hf` for full local embeddings, `hash` for lightweight Docker demos. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
-| `EMBEDDING_DEVICE` | `auto`, `cpu`, or `cuda`. |
+| `EMBEDDING_DEVICE` | Defaults to `cpu` for portability. Set `cuda` only for local GPU acceleration. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |
 | `OPENAI_API_KEY` | OpenAI key for generation, summaries, or vision enrichment. |
-| `GOOGLE_API_KEY` | Gemini key, used when Gemini fallback is enabled. |
 | `LOCAL_LLM_ENDPOINT` | Ollama generation endpoint. |
 | `LOCAL_LLM_MODEL` | Ollama model tag for local generation. |
 | `ENABLE_NEURAL_RERANKER` | Enables cross-encoder reranking. |

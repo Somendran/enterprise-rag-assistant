@@ -1,78 +1,19 @@
-"""
-llm_service.py
-──────────────
-Responsibility: Provide local-first generation with Gemini fallback support.
-
-Design choices:
-1. Prefer local Ollama generation for low-latency/offline operation.
-2. Keep Gemini fallback to a single call (no retry loops).
-3. Return precise, actionable runtime errors for model and quota issues.
-"""
+"""Local Ollama generation service."""
 
 from typing import Any
-from collections import deque
 import json
 import threading
 import time
 from urllib.parse import urlparse, urlunparse
 
 import requests
-from google.api_core.exceptions import NotFound, ResourceExhausted
-from langchain.schema import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-_llm_window_lock = threading.Lock()
-_llm_call_timestamps: deque[float] = deque()
 _local_models_lock = threading.Lock()
 _local_models_cache: tuple[float, list[str]] = (0.0, [])
-
-
-def _acquire_generation_slot() -> None:
-    rpm = max(1, settings.llm_requests_per_minute)
-    now = time.time()
-
-    with _llm_window_lock:
-        # Sliding 60-second window.
-        while _llm_call_timestamps and (now - _llm_call_timestamps[0]) >= 60.0:
-            _llm_call_timestamps.popleft()
-
-        if len(_llm_call_timestamps) >= rpm:
-            retry_after = max(1, int(60 - (now - _llm_call_timestamps[0])))
-            raise RuntimeError(
-                "Application rate limit reached for Gemini generation. "
-                f"Retry after approximately {retry_after} seconds."
-            )
-
-        _llm_call_timestamps.append(now)
-
-
-def _normalize_model_name(name: str) -> str:
-    """Normalize 'models/foo' to 'foo' for stable comparisons."""
-    if name.startswith("models/"):
-        return name.split("/", 1)[1]
-    return name
-
-
-def _discover_generation_models(api_key: str) -> list[str]:
-    """Return discovered model ids that support generateContent."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-
-    discovered: list[str] = []
-    for item in response.json().get("models", []):
-        methods = item.get("supportedGenerationMethods", [])
-        if "generateContent" in methods:
-            name = item.get("name")
-            if not name:
-                continue
-            discovered.append(_normalize_model_name(name))
-
-    return list(dict.fromkeys(discovered))
 
 
 def _extract_ollama_text(data: dict[str, Any]) -> str:
@@ -90,7 +31,6 @@ def _extract_ollama_text(data: dict[str, Any]) -> str:
         if text:
             return text
 
-    # Preserve strict behavior: return empty string if no usable answer is found.
     return ""
 
 
@@ -109,7 +49,6 @@ def _parse_ollama_response(response: requests.Response, stream_enabled: bool) ->
         try:
             event = json.loads(raw_line)
         except json.JSONDecodeError:
-            # Ignore malformed partial lines and keep consuming stream.
             continue
 
         if not isinstance(event, dict):
@@ -203,14 +142,9 @@ def call_local_llm(
     prompt: str,
     max_tokens_override: int | None = None,
 ) -> tuple[str, int, str]:
-    """Generate an answer from local Ollama with at most two total calls.
-
-    Returns:
-        (answer_text, retry_count, retry_reason)
-    """
+    """Generate an answer from local Ollama with at most two total calls."""
     _validate_configured_local_model_exists()
 
-    # Encourage a direct final answer and reduce token spend on reasoning.
     prompt_for_model = (
         "Provide only the final concise answer. "
         "Do not include reasoning traces or analysis tags. "
@@ -221,7 +155,7 @@ def call_local_llm(
     default_budget = max(1, int(settings.llm_max_tokens or settings.local_llm_num_predict))
     base_num_predict = max(1, int(max_tokens_override or default_budget))
     retry_num_predict = max(1, int(settings.local_llm_retry_num_predict))
-    max_attempts = max(1, int(settings.local_llm_max_attempts))
+    max_attempts = min(2, max(1, int(settings.local_llm_max_attempts)))
     last_error: str = "Local LLM returned no output."
     retry_count = 0
     retry_reason = ""
@@ -274,18 +208,16 @@ def call_local_llm(
             )
         except requests.RequestException as exc:
             logger.error("Local LLM request exception: %s", exc)
-            raise RuntimeError(f"Local LLM request failed: {exc}")
+            raise RuntimeError(f"Local LLM request failed: {exc}") from exc
 
         try:
             data = _parse_ollama_response(response, stream_enabled=stream_enabled)
         except Exception as exc:
             logger.error("Local LLM invalid JSON response: %s", exc)
-            raise RuntimeError(f"Local LLM returned invalid JSON: {exc}")
+            raise RuntimeError(f"Local LLM returned invalid JSON: {exc}") from exc
 
         elapsed_s = time.perf_counter() - request_start
         return data, elapsed_s
-
-    max_attempts = min(2, max_attempts)
 
     for attempt in range(1, max_attempts + 1):
         num_predict = base_num_predict if attempt == 1 else retry_num_predict
@@ -300,12 +232,8 @@ def call_local_llm(
         answer_text = _extract_ollama_text(data)
         response_empty = len(answer_text.strip()) == 0
 
-        # If stream mode produced no chunks/text, salvage with one non-stream call
-        # at the same token budget to avoid escalating into full retry immediately.
         if stream_enabled and response_empty and int(stream_chunk_count or 0) == 0:
-            logger.warning(
-                "Local stream produced no chunks. Falling back to non-stream for same attempt."
-            )
+            logger.warning("Local stream produced no chunks. Falling back to non-stream for same attempt.")
             data, elapsed_s = _run_local_request(num_predict=num_predict, stream_enabled=False)
             done_reason = data.get("done_reason")
             eval_count = data.get("eval_count")
@@ -362,49 +290,11 @@ def call_local_llm(
     raise RuntimeError(last_error)
 
 
-def call_gemini(prompt: str) -> str:
-    """Single-attempt Gemini invocation used only as fallback."""
-    model_name = _normalize_model_name(settings.llm_model)
-    _acquire_generation_slot()
-
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=settings.google_api_key,
-        temperature=0,
-        max_retries=0,
-    )
-
-    try:
-        response: Any = llm.invoke([HumanMessage(content=prompt)])
-        return str(response.content).strip()
-    except ResourceExhausted as exc:
-        raise RuntimeError(
-            "Gemini API quota exceeded for model "
-            f"'{model_name}'. No retries were attempted. Error: {exc}"
-        )
-    except NotFound as exc:
-        try:
-            discovered = _discover_generation_models(settings.google_api_key)
-        except Exception:
-            discovered = []
-        raise RuntimeError(
-            "Configured LLM model is unavailable: "
-            f"'{model_name}'. "
-            f"Discovered generate-capable models: {discovered}. "
-            f"Original error: {exc}"
-        )
-
-
 def generate_answer(
     prompt: str,
     max_tokens_override: int | None = None,
 ) -> tuple[str, str, int, str]:
-    """
-    Generate an answer using local-first flow with Gemini fallback.
-
-    Returns:
-        (answer_text, model_used, retry_count, retry_reason)
-    """
+    """Generate an answer using the configured local Ollama model."""
     try:
         logger.info("Calling LOCAL model...")
         local_answer, retry_count, retry_reason = call_local_llm(
@@ -416,20 +306,10 @@ def generate_answer(
         logger.info("Local response raw: %r", cleaned)
 
         if not cleaned:
-            logger.info("Fallback triggered: empty")
-            if not settings.enable_gemini_fallback:
-                raise RuntimeError("Local response was empty and Gemini fallback is disabled.")
-            gemini_answer = call_gemini(prompt)
-            return gemini_answer, "gemini", retry_count, retry_reason
+            raise RuntimeError("Local LLM returned an empty response.")
 
         return cleaned, "local", retry_count, retry_reason
 
     except Exception as exc:
         logger.error("Local model failed: %s", str(exc))
-        if not settings.enable_gemini_fallback:
-            raise RuntimeError(
-                "Local generation failed and Gemini fallback is disabled. "
-                f"Error: {exc}"
-            )
-        gemini_answer = call_gemini(prompt)
-        return gemini_answer, "gemini", 0, ""
+        raise RuntimeError(f"Local generation failed. Error: {exc}") from exc
