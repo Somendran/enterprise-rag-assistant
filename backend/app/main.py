@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import auth, upload, query, ops
 from app.config import settings
-from app.services.vector_store import load_store
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -18,15 +17,12 @@ async def lifespan(app: FastAPI):
     """
     Startup / shutdown lifecycle hook.
 
-    On startup: try to pre-load the FAISS index from disk so the first
-    query doesn't incur the cold-start cost of reading it from disk.
+    Keep startup lightweight so cloud hosts can detect the listening port
+    before model downloads or vector-store loading happen. The FAISS store and
+    embedding model are loaded lazily on first upload/query.
     """
     logger.info("Starting Enterprise RAG Assistant...")
-    store = load_store()
-    if store is not None:
-        logger.info("FAISS index loaded successfully from disk.")
-    else:
-        logger.info("No existing FAISS index found. Ready to receive uploads.")
+    logger.info("Startup complete. Vector store will load lazily on first use.")
     yield
     logger.info("Shutting down Enterprise RAG Assistant.")
 
