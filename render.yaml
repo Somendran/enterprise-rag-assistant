@@ -36,3 +36,45 @@ services:
         sync: false
       - key: ALLOWED_CORS_ORIGINS
         sync: false
+services:
+  - type: web
+    name: enterprise-rag-assistant-api
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: rag-data
+      mountPath: /opt/render/project/src/backend/data
+      sizeGB: 1
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: PUBLIC_DEMO_MODE
+        value: true
+      - key: ENABLE_USER_AUTH
+        value: true
+      - key: USE_OPENAI
+        value: true
+      - key: OPENAI_MODEL
+        value: gpt-5.4-mini
+      - key: ENABLE_DOCLING
+        value: false
+      - key: ENABLE_VISION_ENRICHMENT
+        value: false
+      - key: ENABLE_SUMMARY
+        value: false
+      - key: ENABLE_NEURAL_RERANKER
+        value: false
+      - key: METADATA_DB_PATH
+        value: data/app_metadata.sqlite3
+      - key: FAISS_INDEX_PATH
+        value: data/faiss_index
+      - key: UPLOAD_DIR
+        value: data/uploads
+      - key: APP_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ALLOWED_CORS_ORIGINS
+        sync: false
