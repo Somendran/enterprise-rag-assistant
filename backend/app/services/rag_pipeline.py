@@ -814,8 +814,12 @@ def run_rag_pipeline(
                 llm_retry_count = 0
                 llm_retry_reason = ""
             except Exception as exc:
-                if settings.public_demo_mode or settings.app_env.strip().lower() == "production":
-                    logger.warning("OpenAI generation failed in deployed mode. error=%s", exc)
+                if (
+                    not settings.openai_fallback_to_local
+                    or settings.public_demo_mode
+                    or settings.app_env.strip().lower() == "production"
+                ):
+                    logger.warning("OpenAI generation failed. error=%s", exc)
                     raise RuntimeError(f"OpenAI generation failed: {exc}") from exc
                 logger.warning("OpenAI generation failed; falling back to local LLM. error=%s", exc)
                 generation_token_budget = (

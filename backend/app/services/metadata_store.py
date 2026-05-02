@@ -53,6 +53,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             owner_user_id TEXT NOT NULL DEFAULT '',
             visibility TEXT NOT NULL DEFAULT 'shared',
             allowed_roles_json TEXT NOT NULL DEFAULT '[]',
+            ocr_applied INTEGER NOT NULL DEFAULT 0,
+            text_coverage_ratio REAL NOT NULL DEFAULT 0.0,
+            low_text_pages INTEGER NOT NULL DEFAULT 0,
+            ingestion_warnings_json TEXT NOT NULL DEFAULT '[]',
             is_demo INTEGER NOT NULL DEFAULT 0,
             demo_session_id TEXT NOT NULL DEFAULT '',
             expires_at INTEGER NOT NULL DEFAULT 0
@@ -62,6 +66,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "documents", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "documents", "visibility", "TEXT NOT NULL DEFAULT 'shared'")
     _ensure_column(conn, "documents", "allowed_roles_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "documents", "ocr_applied", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "documents", "text_coverage_ratio", "REAL NOT NULL DEFAULT 0.0")
+    _ensure_column(conn, "documents", "low_text_pages", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "documents", "ingestion_warnings_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "documents", "is_demo", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "documents", "demo_session_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "documents", "expires_at", "INTEGER NOT NULL DEFAULT 0")
@@ -222,6 +230,10 @@ def _json_list(value: str | None) -> list[str]:
 def _decode_document_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     item["allowed_roles"] = _json_list(str(item.pop("allowed_roles_json", "[]")))
+    item["ingestion_warnings"] = _json_list(str(item.pop("ingestion_warnings_json", "[]")))
+    item["ocr_applied"] = bool(item.get("ocr_applied", 0))
+    item["text_coverage_ratio"] = float(item.get("text_coverage_ratio", 0.0) or 0.0)
+    item["low_text_pages"] = int(item.get("low_text_pages", 0) or 0)
     return item
 
 
@@ -258,21 +270,27 @@ def upsert_document(
     owner_user_id: str = "",
     visibility: str = "shared",
     allowed_roles: list[str] | None = None,
+    ocr_applied: bool = False,
+    text_coverage_ratio: float = 0.0,
+    low_text_pages: int = 0,
+    ingestion_warnings: list[str] | None = None,
     is_demo: bool = False,
     demo_session_id: str = "",
     expires_at: int = 0,
 ) -> None:
     normalized_roles = sorted({str(role).strip().lower() for role in (allowed_roles or []) if str(role).strip()})
     normalized_visibility = visibility if visibility in {"private", "shared", "role"} else "shared"
+    normalized_warnings = [str(item).strip() for item in (ingestion_warnings or []) if str(item).strip()]
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO documents (
                 file_hash, filename, chunk_count, document_id, embedding_model,
                 indexed_at, parsing_method, upload_path, upload_status, vision_calls_used,
-                owner_user_id, visibility, allowed_roles_json, is_demo, demo_session_id, expires_at
+                owner_user_id, visibility, allowed_roles_json, ocr_applied, text_coverage_ratio,
+                low_text_pages, ingestion_warnings_json, is_demo, demo_session_id, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_hash) DO UPDATE SET
                 filename = excluded.filename,
                 chunk_count = excluded.chunk_count,
@@ -289,6 +307,10 @@ def upsert_document(
                 END,
                 visibility = excluded.visibility,
                 allowed_roles_json = excluded.allowed_roles_json,
+                ocr_applied = excluded.ocr_applied,
+                text_coverage_ratio = excluded.text_coverage_ratio,
+                low_text_pages = excluded.low_text_pages,
+                ingestion_warnings_json = excluded.ingestion_warnings_json,
                 is_demo = excluded.is_demo,
                 demo_session_id = excluded.demo_session_id,
                 expires_at = excluded.expires_at
@@ -307,6 +329,10 @@ def upsert_document(
                 owner_user_id,
                 normalized_visibility,
                 json.dumps(normalized_roles),
+                1 if ocr_applied else 0,
+                float(text_coverage_ratio or 0.0),
+                int(low_text_pages or 0),
+                json.dumps(normalized_warnings),
                 1 if is_demo else 0,
                 demo_session_id,
                 int(expires_at or 0),

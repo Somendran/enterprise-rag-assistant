@@ -5,6 +5,7 @@ import time
 import shutil
 import hashlib
 import threading
+from dataclasses import dataclass
 from uuid import uuid4
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from app.api.upload_validation import count_pdf_pages, safe_pdf_filename, valida
 from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents, chunk_structured_blocks
 from app.services.ingestion.doc_parser import parse_document
+from app.services.ingestion.quality import assess_pdf_text_quality, summarize_block_text_quality
 from app.services.ingestion.vision_enricher import enrich_blocks_with_vision, get_last_vision_calls_used
 from app.services.query_cache import clear_query_cache
 from app.services import metadata_store
@@ -46,6 +48,17 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+@dataclass
+class PreparedChunks:
+    chunks: list
+    parsing_method: str
+    vision_calls_used: int
+    ocr_applied: bool
+    text_coverage_ratio: float
+    low_text_pages: int
+    ingestion_warnings: list[str]
 
 
 def _client_ip(request: Request) -> str:
@@ -147,29 +160,70 @@ def _prepare_chunks_for_indexing(
     owner_user_id: str = "",
     visibility: str = "shared",
     allowed_roles: list[str] | None = None,
-) -> tuple[list, str, int]:
+) -> PreparedChunks:
     chunks = []
     vision_calls_used = 0
     parsing_method = "legacy_pdf"
+    ocr_applied = False
+    quality = assess_pdf_text_quality(file_path)
+    ingestion_warnings = list(quality.warnings)
+    parsed_text_coverage = float(quality.text_coverage_ratio)
+    parsed_low_text_pages = int(quality.low_text_pages)
 
     if settings.enable_docling:
         try:
-            blocks = parse_document(str(file_path))
+            force_ocr = bool(settings.enable_ocr)
+            blocks = parse_document(str(file_path), force_ocr=force_ocr)
             if settings.enable_vision_enrichment:
                 blocks = enrich_blocks_with_vision(blocks)
                 vision_calls_used = get_last_vision_calls_used()
 
+            block_coverage, block_low_pages = summarize_block_text_quality(blocks)
+            should_retry_ocr = (
+                (not force_ocr)
+                and quality.ocr_recommended
+                and block_coverage < float(settings.ingestion_ocr_page_ratio_threshold)
+            )
+
+            if should_retry_ocr:
+                logger.info(
+                    "Retrying structured ingestion with OCR | file=%s text_coverage=%.3f low_text_pages=%d",
+                    filename,
+                    quality.text_coverage_ratio,
+                    quality.low_text_pages,
+                )
+                ocr_blocks = parse_document(str(file_path), force_ocr=True)
+                if settings.enable_vision_enrichment:
+                    ocr_blocks = enrich_blocks_with_vision(ocr_blocks)
+                    vision_calls_used = get_last_vision_calls_used()
+                if ocr_blocks:
+                    blocks = ocr_blocks
+                    ocr_applied = True
+                    parsing_method = "docling_ocr"
+                    block_coverage, block_low_pages = summarize_block_text_quality(blocks)
+
             chunks = chunk_structured_blocks(blocks)
-            parsing_method = "docling"
+            if not ocr_applied:
+                ocr_applied = force_ocr
+                parsing_method = "docling_ocr" if force_ocr else "docling"
+            if block_coverage < quality.text_coverage_ratio:
+                block_coverage = quality.text_coverage_ratio
+            low_text_pages = max(quality.low_text_pages, block_low_pages)
+            parsed_text_coverage = float(block_coverage)
+            parsed_low_text_pages = int(low_text_pages)
             logger.info(
-                "Structured ingestion completed | file=%s blocks=%d chunks=%d vision_calls_used=%d",
+                "Structured ingestion completed | file=%s blocks=%d chunks=%d parsing_method=%s text_coverage=%.3f low_text_pages=%d vision_calls_used=%d",
                 filename,
                 len(blocks),
                 len(chunks),
+                parsing_method,
+                block_coverage,
+                low_text_pages,
                 vision_calls_used,
             )
         except Exception as docling_exc:
             parsing_method = "legacy_pdf_fallback"
+            ingestion_warnings.append(f"Structured parser failed; used legacy PDF parser: {docling_exc}")
             logger.warning(
                 "Structured ingestion failed; falling back to legacy parser | file=%s error=%s",
                 filename,
@@ -181,7 +235,15 @@ def _prepare_chunks_for_indexing(
         chunks = split_documents(documents)
 
     if not chunks:
+        if quality.ocr_recommended:
+            raise ValueError(
+                "Document appears to be scanned and OCR did not produce parseable text. "
+                "Enable OCR support or upload a text-searchable PDF."
+            )
         raise ValueError("Document contains no parseable text.")
+
+    text_coverage_ratio = float(parsed_text_coverage)
+    low_text_pages = int(parsed_low_text_pages)
 
     indexed_at = int(time.time())
     for idx, chunk in enumerate(chunks):
@@ -194,12 +256,24 @@ def _prepare_chunks_for_indexing(
                 "visibility": visibility,
                 "allowed_roles": allowed_roles or [],
                 "parsing_method": parsing_method,
+                "ocr_applied": ocr_applied,
+                "text_coverage_ratio": text_coverage_ratio,
+                "low_text_pages": low_text_pages,
+                "ingestion_warnings": ingestion_warnings,
                 "chunk_index": idx,
                 "indexed_at": indexed_at,
             }
         )
 
-    return chunks, parsing_method, vision_calls_used
+    return PreparedChunks(
+        chunks=chunks,
+        parsing_method=parsing_method,
+        vision_calls_used=vision_calls_used,
+        ocr_applied=ocr_applied,
+        text_coverage_ratio=text_coverage_ratio,
+        low_text_pages=low_text_pages,
+        ingestion_warnings=ingestion_warnings,
+    )
 
 
 def _result_to_dict(item: UploadItemResult) -> dict:
@@ -284,12 +358,16 @@ def _ingest_saved_files(
                     document_id=str(existing.get("document_id", document_id)),
                     parsing_method=str(existing.get("parsing_method", "")) or None,
                     vision_calls_used=int(existing.get("vision_calls_used", 0) or 0),
+                    ocr_applied=bool(existing.get("ocr_applied", False)),
+                    text_coverage_ratio=float(existing.get("text_coverage_ratio", 0.0) or 0.0),
+                    low_text_pages=int(existing.get("low_text_pages", 0) or 0),
+                    ingestion_warnings=list(existing.get("ingestion_warnings", [])),
                 )
             )
             continue
 
         try:
-            chunks, parsing_method, vision_calls_used = _prepare_chunks_for_indexing(
+            prepared = _prepare_chunks_for_indexing(
                 file_path=file_path,
                 filename=safe_filename,
                 file_hash=file_hash,
@@ -310,34 +388,42 @@ def _ingest_saved_files(
                     results=[_result_to_dict(result) for result in results],
                 )
 
-            add_documents(chunks)
+            add_documents(prepared.chunks)
             register_indexed_document(
                 file_hash=file_hash,
                 filename=safe_filename,
-                chunk_count=len(chunks),
+                chunk_count=len(prepared.chunks),
                 document_id=document_id,
-                parsing_method=parsing_method,
+                parsing_method=prepared.parsing_method,
                 upload_path=str(file_path),
                 upload_status="indexed",
-                vision_calls_used=vision_calls_used,
+                vision_calls_used=prepared.vision_calls_used,
                 owner_user_id=current_user.id if current_user else "",
                 visibility=visibility,
                 allowed_roles=allowed_roles,
                 is_demo=bool(current_user.is_demo) if current_user else False,
                 demo_session_id=current_user.id if current_user and current_user.is_demo else "",
                 expires_at=_demo_expiry(current_user) if current_user else 0,
+                ocr_applied=prepared.ocr_applied,
+                text_coverage_ratio=prepared.text_coverage_ratio,
+                low_text_pages=prepared.low_text_pages,
+                ingestion_warnings=prepared.ingestion_warnings,
             )
-            total_chunks_indexed += len(chunks)
+            total_chunks_indexed += len(prepared.chunks)
             results.append(
                 UploadItemResult(
                     filename=safe_filename,
-                    chunks_indexed=len(chunks),
+                    chunks_indexed=len(prepared.chunks),
                     status="success",
                     message="Document ingested successfully.",
                     file_hash=file_hash,
                     document_id=document_id,
-                    parsing_method=parsing_method,
-                    vision_calls_used=vision_calls_used,
+                    parsing_method=prepared.parsing_method,
+                    vision_calls_used=prepared.vision_calls_used,
+                    ocr_applied=prepared.ocr_applied,
+                    text_coverage_ratio=prepared.text_coverage_ratio,
+                    low_text_pages=prepared.low_text_pages,
+                    ingestion_warnings=prepared.ingestion_warnings,
                 )
             )
         except Exception as exc:
@@ -614,7 +700,7 @@ async def reindex_knowledge_base_file(
     ).hexdigest()[:16]
 
     try:
-        chunks, parsing_method, vision_calls_used = _prepare_chunks_for_indexing(
+        prepared = _prepare_chunks_for_indexing(
             file_path=stored_path,
             filename=filename,
             file_hash=file_hash,
@@ -624,19 +710,23 @@ async def reindex_knowledge_base_file(
             allowed_roles=list(meta.get("allowed_roles", [])),
         )
         delete_indexed_document(file_hash)
-        add_documents(chunks)
+        add_documents(prepared.chunks)
         register_indexed_document(
             file_hash=file_hash,
             filename=filename,
-            chunk_count=len(chunks),
+            chunk_count=len(prepared.chunks),
             document_id=document_id,
-            parsing_method=parsing_method,
+            parsing_method=prepared.parsing_method,
             upload_path=str(stored_path),
             upload_status="indexed",
-            vision_calls_used=vision_calls_used,
+            vision_calls_used=prepared.vision_calls_used,
             owner_user_id=str(meta.get("owner_user_id", "")),
             visibility=str(meta.get("visibility", "shared")),
             allowed_roles=list(meta.get("allowed_roles", [])),
+            ocr_applied=prepared.ocr_applied,
+            text_coverage_ratio=prepared.text_coverage_ratio,
+            low_text_pages=prepared.low_text_pages,
+            ingestion_warnings=prepared.ingestion_warnings,
         )
         clear_query_cache()
         metadata_store.record_audit_event(
@@ -645,17 +735,21 @@ async def reindex_knowledge_base_file(
             action="document.reindex",
             resource_type="document",
             resource_id=file_hash,
-            detail={"filename": filename, "chunks_indexed": len(chunks)},
+            detail={"filename": filename, "chunks_indexed": len(prepared.chunks)},
         )
         return UploadItemResult(
             filename=filename,
-            chunks_indexed=len(chunks),
+            chunks_indexed=len(prepared.chunks),
             status="success",
             message="Document reindexed successfully.",
             file_hash=file_hash,
             document_id=document_id,
-            parsing_method=parsing_method,
-            vision_calls_used=vision_calls_used,
+            parsing_method=prepared.parsing_method,
+            vision_calls_used=prepared.vision_calls_used,
+            ocr_applied=prepared.ocr_applied,
+            text_coverage_ratio=prepared.text_coverage_ratio,
+            low_text_pages=prepared.low_text_pages,
+            ingestion_warnings=prepared.ingestion_warnings,
         )
     except Exception as exc:
         logger.error("Failed to reindex document '%s': %s", file_hash, exc, exc_info=True)

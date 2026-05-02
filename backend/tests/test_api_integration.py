@@ -36,8 +36,19 @@ text_splitter_stub.chunk_structured_blocks = lambda blocks: []
 sys.modules.setdefault("app.services.text_splitter", text_splitter_stub)
 
 doc_parser_stub = types.ModuleType("app.services.ingestion.doc_parser")
-doc_parser_stub.parse_document = lambda file_path: []
+doc_parser_stub.parse_document = lambda file_path, force_ocr=None: []
 sys.modules.setdefault("app.services.ingestion.doc_parser", doc_parser_stub)
+
+quality_stub = types.ModuleType("app.services.ingestion.quality")
+quality_stub.assess_pdf_text_quality = lambda file_path: types.SimpleNamespace(
+    total_pages=0,
+    text_coverage_ratio=0.0,
+    low_text_pages=0,
+    ocr_recommended=False,
+    warnings=[],
+)
+quality_stub.summarize_block_text_quality = lambda blocks: (0.0, 0)
+sys.modules.setdefault("app.services.ingestion.quality", quality_stub)
 
 vision_enricher_stub = types.ModuleType("app.services.ingestion.vision_enricher")
 vision_enricher_stub.enrich_blocks_with_vision = lambda blocks: blocks

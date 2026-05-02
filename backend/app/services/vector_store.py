@@ -40,6 +40,7 @@ from app.services.embedding_service import (
     get_embedding_model,
     is_local_embedding_backend,
     embedding_backend_name,
+    resolve_embedding_model_name,
 )
 from app.services import metadata_store
 from app.config import settings
@@ -91,13 +92,35 @@ def _index_path() -> str:
     and eliminate a whole class of dimension mismatch failures.
     """
     base_path = Path(settings.faiss_index_path).resolve()
-    model_name = settings.embedding_model.strip().lower()
+    model_name = resolve_embedding_model_name().strip().lower()
 
     # Keep directory names readable and filesystem-safe, plus a short hash.
     safe_name = re.sub(r"[^a-z0-9._-]+", "-", model_name).strip("-")[:48] or "unknown-model"
     model_hash = hashlib.sha1(model_name.encode("utf-8")).hexdigest()[:10]
     scoped_path = base_path / f"{safe_name}-{model_hash}"
     return str(scoped_path)
+
+
+def _configured_embedding_is_supported() -> bool:
+    configured = (settings.embedding_model or "").strip()
+    return not configured or configured.startswith("sentence-transformers/")
+
+
+def _find_unsupported_configured_index() -> Optional[Path]:
+    """Find a persisted index for an unsupported configured model, if present."""
+    if _configured_embedding_is_supported():
+        return None
+
+    configured = (settings.embedding_model or "").strip()
+    base_path = Path(settings.faiss_index_path).resolve()
+    if not base_path.exists():
+        return None
+
+    for meta_file in base_path.glob(f"*/{_META_FILENAME}"):
+        meta = _read_index_meta(str(meta_file.parent))
+        if meta and str(meta.get("embedding_model", "")).strip() == configured:
+            return meta_file.parent
+    return None
 
 
 def _meta_path(index_path: str) -> Path:
@@ -150,7 +173,7 @@ def _write_index_meta(index_path: str, dimension: Optional[int]) -> None:
     meta_file.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
-        "embedding_model": settings.embedding_model,
+        "embedding_model": resolve_embedding_model_name(),
         "dimension": dimension,
     }
     meta_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -176,7 +199,7 @@ def _migrate_json_registry_if_needed() -> None:
             filename=str(meta.get("filename", "unknown")),
             chunk_count=int(meta.get("chunk_count", 0) or 0),
             document_id=str(meta.get("document_id", "")),
-            embedding_model=str(meta.get("embedding_model", settings.embedding_model)),
+            embedding_model=str(meta.get("embedding_model", resolve_embedding_model_name())),
             indexed_at=int(meta.get("indexed_at", 0) or 0),
             parsing_method=str(meta.get("parsing_method", "unknown")),
             upload_path=str(meta.get("upload_path", "")),
@@ -193,7 +216,7 @@ def _resolve_current_embedding_dimension(index_path: str, embeddings: Embeddings
     Fall back to a single probe embedding when metadata is missing/stale.
     """
     meta = _read_index_meta(index_path)
-    if meta and meta.get("embedding_model") == settings.embedding_model:
+    if meta and meta.get("embedding_model") == resolve_embedding_model_name():
         dim = meta.get("dimension")
         if isinstance(dim, int) and dim > 0:
             return dim
@@ -236,6 +259,10 @@ def register_indexed_document(
     owner_user_id: str = "",
     visibility: str = "shared",
     allowed_roles: list[str] | None = None,
+    ocr_applied: bool = False,
+    text_coverage_ratio: float = 0.0,
+    low_text_pages: int = 0,
+    ingestion_warnings: list[str] | None = None,
     is_demo: bool = False,
     demo_session_id: str = "",
     expires_at: int = 0,
@@ -246,7 +273,7 @@ def register_indexed_document(
         filename=filename,
         chunk_count=chunk_count,
         document_id=document_id,
-        embedding_model=settings.embedding_model,
+        embedding_model=resolve_embedding_model_name(),
         indexed_at=int(time.time()),
         parsing_method=parsing_method,
         upload_path=upload_path,
@@ -255,6 +282,10 @@ def register_indexed_document(
         owner_user_id=owner_user_id,
         visibility=visibility,
         allowed_roles=allowed_roles,
+        ocr_applied=ocr_applied,
+        text_coverage_ratio=text_coverage_ratio,
+        low_text_pages=low_text_pages,
+        ingestion_warnings=ingestion_warnings,
         is_demo=is_demo,
         demo_session_id=demo_session_id,
         expires_at=expires_at,
@@ -383,6 +414,17 @@ def get_or_create_store() -> FAISS:
 
     if _store is not None:
         return _store
+
+    unsupported_index = _find_unsupported_configured_index()
+    if unsupported_index is not None:
+        effective_model = resolve_embedding_model_name()
+        raise RuntimeError(
+            "Embedding/index mismatch: EMBEDDING_MODEL is set to "
+            f"'{settings.embedding_model}', but this runtime only loads local "
+            f"sentence-transformers embeddings and would use '{effective_model}'. "
+            f"An existing FAISS index for the unsupported model was found at '{unsupported_index}'. "
+            "Set EMBEDDING_MODEL to a sentence-transformers model and reindex, or reset the knowledge base."
+        )
 
     index_path = _index_path()
     embeddings = get_embedding_model()
@@ -596,7 +638,7 @@ def get_knowledge_base_version() -> str:
     meta_mtime = _meta_path(str(index_path)).stat().st_mtime if _meta_path(str(index_path)).exists() else 0
     registry_mtime = _doc_registry_path(str(index_path)).stat().st_mtime if _doc_registry_path(str(index_path)).exists() else 0
     index_mtime = index_path.stat().st_mtime
-    return f"{settings.embedding_model}:{int(max(meta_mtime, registry_mtime, index_mtime))}"
+    return f"{resolve_embedding_model_name()}:{int(max(meta_mtime, registry_mtime, index_mtime))}"
 
 
 def reset_vector_store() -> bool:

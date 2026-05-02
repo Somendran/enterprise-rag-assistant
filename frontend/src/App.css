@@ -542,6 +542,12 @@
 
 .chat-bubble p {
   color: inherit;
+  margin: 0;
+}
+
+.chat-bubble.user p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .loading-bubble {
@@ -577,15 +583,20 @@
   padding: 6px 8px 6px 14px;
 }
 
-.composer input {
+.composer textarea {
   border: 0;
   padding: 10px 6px;
   font-size: 1rem;
   color: #2a3340;
   background: transparent;
+  line-height: 1.35;
+  min-height: 42px;
+  max-height: 132px;
+  resize: none;
+  overflow-y: auto;
 }
 
-.composer input:focus {
+.composer textarea:focus {
   outline: none;
 }
 

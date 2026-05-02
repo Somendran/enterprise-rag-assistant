@@ -235,9 +235,8 @@ def _merge_markdown_table_rows(blocks: list[dict[str, Any]]) -> list[dict[str, A
     return merged
 
 
-def _build_converter(document_converter_cls: type):
-    if settings.enable_ocr:
-        return document_converter_cls()
+def _build_converter(document_converter_cls: type, force_ocr: bool | None = None):
+    use_ocr = bool(settings.enable_ocr if force_ocr is None else force_ocr)
 
     try:
         from docling.datamodel.base_models import InputFormat  # type: ignore
@@ -246,9 +245,9 @@ def _build_converter(document_converter_cls: type):
 
         pdf_options = PdfPipelineOptions()
         if hasattr(pdf_options, "do_ocr"):
-            pdf_options.do_ocr = False
+            pdf_options.do_ocr = use_ocr
         if hasattr(pdf_options, "ocr_options") and hasattr(pdf_options.ocr_options, "force_full_page_ocr"):
-            pdf_options.ocr_options.force_full_page_ocr = False
+            pdf_options.ocr_options.force_full_page_ocr = use_ocr
 
         return document_converter_cls(
             format_options={
@@ -357,7 +356,7 @@ def _fallback_parse_batch(
     return fallback_blocks
 
 
-def parse_document(file_path: str) -> List[Dict]:
+def parse_document(file_path: str, force_ocr: bool | None = None) -> List[Dict]:
     """Parse a PDF into structured blocks using Docling.
 
     Returns normalized blocks with keys:
@@ -385,7 +384,7 @@ def parse_document(file_path: str) -> List[Dict]:
     uploaded_at = datetime.now(timezone.utc).isoformat()
     document_id = hashlib.sha1(f"{path.name}:{file_hash}".encode("utf-8")).hexdigest()[:16]
 
-    converter = _build_converter(DocumentConverter)
+    converter = _build_converter(DocumentConverter, force_ocr=force_ocr)
 
     try:
         reader = PdfReader(str(path))

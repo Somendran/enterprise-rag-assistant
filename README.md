@@ -178,9 +178,10 @@ After the backend is live, seed the curated PDFs so visitors can try the app imm
 | `DEMO_UPLOADS_PER_HOUR` | Anonymous upload requests allowed per session per hour. |
 | `DEMO_QUERIES_PER_HOUR` | Anonymous query requests allowed per session per hour. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
-| `EMBEDDING_DEVICE` | CPU-only for this project. Keep this as `cpu`. |
+| `EMBEDDING_DEVICE` | Embedding runtime device. Use `cpu`, `auto`, `cuda`, or `cuda:<index>` when CUDA-enabled PyTorch is available. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |
 | `OPENAI_API_KEY` | OpenAI key for generation, summaries, or vision enrichment. |
+| `OPENAI_FALLBACK_TO_LOCAL` | Optional local Ollama fallback when OpenAI generation fails. Keep `false` to use OpenAI only. |
 | `LOCAL_LLM_ENDPOINT` | Ollama generation endpoint. |
 | `LOCAL_LLM_MODEL` | Ollama model tag for local generation. |
 | `ENABLE_NEURAL_RERANKER` | Enables cross-encoder reranking. |

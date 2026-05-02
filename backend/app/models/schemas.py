@@ -33,6 +33,10 @@ class UploadItemResult(BaseModel):
     document_id: Optional[str] = Field(default=None, description="Stable internal document id.")
     parsing_method: Optional[str] = Field(default=None, description="Parser path used for ingestion.")
     vision_calls_used: int = Field(default=0, description="Vision enrichment calls used during ingestion.")
+    ocr_applied: bool = Field(default=False, description="Whether OCR was used during ingestion.")
+    text_coverage_ratio: float = Field(default=0.0, description="Share of pages with enough extractable text.")
+    low_text_pages: int = Field(default=0, description="Pages with very little extractable text.")
+    ingestion_warnings: List[str] = Field(default_factory=list, description="Non-fatal ingestion quality warnings.")
 
 
 class UploadBatchResponse(BaseModel):
@@ -92,6 +96,10 @@ class KnowledgeBaseFileItem(BaseModel):
     owner_user_id: str = Field(default="", description="User id that uploaded or owns this document.")
     visibility: str = Field(default="shared", description="shared, private, or role.")
     allowed_roles: List[str] = Field(default_factory=list, description="Roles that can access role-restricted docs.")
+    ocr_applied: bool = Field(default=False, description="Whether OCR was used during ingestion.")
+    text_coverage_ratio: float = Field(default=0.0, description="Share of pages with enough extractable text.")
+    low_text_pages: int = Field(default=0, description="Pages with very little extractable text.")
+    ingestion_warnings: List[str] = Field(default_factory=list, description="Non-fatal ingestion quality warnings.")
 
 
 class KnowledgeBaseFilesResponse(BaseModel):

@@ -19,12 +19,44 @@ DEFAULT_LOCAL_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 def _resolve_embedding_device() -> str:
     requested = (settings.embedding_device or "cpu").strip().lower()
-    if requested != "cpu":
+    if requested in {"", "cpu"}:
+        return "cpu"
+
+    if requested == "gpu":
+        requested = "cuda"
+
+    if requested == "auto":
+        return "cuda" if _cuda_is_available() else "cpu"
+
+    if requested == "cuda" or requested.startswith("cuda:"):
+        if _cuda_is_available():
+            return requested
         logger.warning(
-            "EMBEDDING_DEVICE='%s' is ignored. This project runs embeddings on CPU.",
+            "EMBEDDING_DEVICE='%s' requested but CUDA is unavailable to PyTorch. "
+            "Falling back to CPU.",
             requested,
         )
+        return "cpu"
+
+    logger.warning(
+        "Unsupported EMBEDDING_DEVICE='%s'. Supported values are cpu, auto, cuda, "
+        "or cuda:<index>. Falling back to CPU.",
+        requested,
+    )
     return "cpu"
+
+
+def _cuda_is_available() -> bool:
+    try:
+        import torch
+    except ImportError:
+        logger.warning(
+            "EMBEDDING_DEVICE requests CUDA, but PyTorch is not installed. "
+            "Falling back to CPU."
+        )
+        return False
+
+    return bool(torch.cuda.is_available())
 
 
 class LocalHuggingFaceEmbeddings(Embeddings):
@@ -90,6 +122,14 @@ def embedding_backend_name(embeddings: Embeddings) -> str:
     return type(embeddings).__name__
 
 
+def resolve_embedding_model_name() -> str:
+    """Return the sentence-transformers model this runtime can actually load."""
+    configured_model = (settings.embedding_model or "").strip()
+    if configured_model.startswith("sentence-transformers/"):
+        return configured_model
+    return DEFAULT_LOCAL_EMBEDDING_MODEL
+
+
 def get_embedding_model() -> Embeddings:
     return _get_cached_embedding_model()
 
@@ -97,11 +137,7 @@ def get_embedding_model() -> Embeddings:
 @lru_cache(maxsize=1)
 def _get_cached_embedding_model() -> Embeddings:
     configured_model = (settings.embedding_model or "").strip()
-    model_name = (
-        configured_model
-        if configured_model.startswith("sentence-transformers/")
-        else DEFAULT_LOCAL_EMBEDDING_MODEL
-    )
+    model_name = resolve_embedding_model_name()
 
     if model_name != configured_model:
         logger.info(

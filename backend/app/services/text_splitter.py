@@ -56,7 +56,8 @@ def chunk_structured_blocks(blocks: List[dict]) -> List[Document]:
             return
 
         text = "\n\n".join(line for line in buffer_lines if line.strip()).strip()
-        if not text:
+        text = _clean_text_for_indexing(text)
+        if not text or not _has_enough_signal(text):
             buffer_lines = []
             buffer_ids = []
             buffer_block_types = set()
@@ -138,8 +139,11 @@ def _clean_text_for_indexing(text: str) -> str:
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
     cleaned = cleaned.replace("\ufffd", " ").replace("�", " ")
     cleaned = unicodedata.normalize("NFKD", cleaned).encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"(?<=\b[A-Za-z])\s+(?=[A-Za-z]\b)", "", cleaned)
     cleaned = cleaned.replace("-\n", "")
     cleaned = re.sub(r"(?<=\w)\n(?=\w)", " ", cleaned)
+    cleaned = re.sub(r"(?<=\w)\s{2,}(?=\w)", " ", cleaned)
+    cleaned = re.sub(r"([A-Za-z])\1{4,}", r"\1\1", cleaned)
 
     noise_patterns = [
         r"^contact\b",
@@ -161,6 +165,15 @@ def _clean_text_for_indexing(text: str) -> str:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return cleaned.strip()
+
+
+def _has_enough_signal(text: str) -> bool:
+    """Drop OCR fragments that contain almost no searchable content."""
+    alnum = re.sub(r"[^a-zA-Z0-9]", "", text or "")
+    if len(alnum) < 12:
+        return False
+    letters = re.sub(r"[^a-zA-Z]", "", text or "")
+    return len(letters) >= 8
 
 
 def split_documents(documents: List[Document]) -> List[Document]:
@@ -189,7 +202,7 @@ def split_documents(documents: List[Document]) -> List[Document]:
     # Preserve layout-derived context so retrieval can target the right section/table.
     for chunk in chunks:
         chunk.page_content = _clean_text_for_indexing(chunk.page_content)
-        if not chunk.page_content:
+        if not chunk.page_content or not _has_enough_signal(chunk.page_content):
             continue
 
         header_hints = chunk.metadata.get("header_hints") or []
@@ -202,7 +215,7 @@ def split_documents(documents: List[Document]) -> List[Document]:
         has_tables = bool(chunk.metadata.get("has_tables", False))
         chunk.metadata["chunk_has_tables"] = has_tables
 
-    chunks = [chunk for chunk in chunks if chunk.page_content.strip()]
+    chunks = [chunk for chunk in chunks if chunk.page_content.strip() and _has_enough_signal(chunk.page_content)]
 
     if settings.enable_metadata_enrichment:
         chunks = enrich_chunk_metadata(chunks)

@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     openai_temperature: float = 0.2
     openai_timeout_seconds: int = 30
     openai_network_retry_attempts: int = 1
+    openai_fallback_to_local: bool = False
 
     # Storage paths
     # Where uploaded PDFs are saved on disk
@@ -101,6 +102,8 @@ class Settings(BaseSettings):
     enable_docling: bool = True
     enable_ocr: bool = False
     docling_batch_size: int = 10
+    ingestion_low_text_page_chars: int = 80
+    ingestion_ocr_page_ratio_threshold: float = 0.60
     enable_vision_enrichment: bool = True
     max_vision_calls_per_doc: int = 10
     openai_vision_model: str = "gpt-4.1-mini"
@@ -121,7 +124,7 @@ class Settings(BaseSettings):
 
     # Embedding ingestion throughput
     # Number of chunks per embedding call during upload ingestion.
-    # Tuned for local sentence-transformers throughput on CPU.
+    # Tune batch size for the selected sentence-transformers device.
     embedding_batch_size: int = 64
     # Optional embedding parallelism. Keep at 1 unless backend is confirmed
     # thread-safe for concurrent embed_documents calls.

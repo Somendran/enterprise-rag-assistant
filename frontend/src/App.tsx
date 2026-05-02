@@ -403,7 +403,7 @@ function App() {
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const queryInputRef = useRef<HTMLInputElement>(null);
+  const queryInputRef = useRef<HTMLTextAreaElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -1471,13 +1471,19 @@ function App() {
 
         <div className="composer-wrap">
           <form onSubmit={handleQuery} className="composer">
-            <input
+            <textarea
               ref={queryInputRef}
-              type="text"
               placeholder="Ask anything about your indexed documents..."
               value={inputTitle}
               onChange={(e) => setInputTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  e.currentTarget.form?.requestSubmit();
+                }
+              }}
               disabled={isQuerying}
+              rows={1}
             />
             <button type="submit" className="send-btn" disabled={isQuerying || !inputTitle.trim()}>
               <Send size={15} />
