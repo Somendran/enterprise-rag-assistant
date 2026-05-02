@@ -124,6 +124,41 @@ VITE_API_KEY=replace-with-a-long-random-secret
 
 When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 
+## Public Resume Demo Deployment
+
+This repo includes a Render blueprint (`render.yaml`) and Vercel config (`frontend/vercel.json`) for a public showcase deployment.
+
+Backend on Render:
+
+```env
+APP_ENV=production
+APP_API_KEY=replace-with-a-long-random-admin-secret
+PUBLIC_DEMO_MODE=true
+USE_OPENAI=true
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-5.4-mini
+ALLOWED_CORS_ORIGINS=https://your-vercel-app.vercel.app
+ENABLE_DOCLING=false
+ENABLE_VISION_ENRICHMENT=false
+ENABLE_SUMMARY=false
+ENABLE_NEURAL_RERANKER=false
+```
+
+Frontend on Vercel:
+
+```env
+VITE_API_URL=https://your-render-service.onrender.com
+VITE_PUBLIC_DEMO_MODE=true
+```
+
+Do not set `VITE_API_KEY` for the public demo. The frontend sends an anonymous `X-Demo-Session-Id`; the backend enforces public upload/query quotas and keeps admin operations behind login or `APP_API_KEY`.
+
+After the backend is live, seed the curated PDFs so visitors can try the app immediately:
+
+```powershell
+.\scripts\seed_sample_docs.ps1 -ApiUrl https://your-render-service.onrender.com -ApiKey <APP_API_KEY>
+```
+
 ## Important Configuration
 
 | Variable | Description |
@@ -135,6 +170,13 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 | `ALLOWED_CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS. |
 | `MAX_UPLOAD_SIZE_MB` | Maximum PDF upload size handled by the app. |
 | `METADATA_DB_PATH` | SQLite store for document registry, feedback, and admin summaries. |
+| `PUBLIC_DEMO_MODE` | Enables anonymous public demo access with session isolation and quotas. |
+| `DEMO_MAX_UPLOAD_MB` | Maximum PDF size for anonymous demo uploads. |
+| `DEMO_MAX_PAGES` | Maximum PDF page count for anonymous demo uploads. |
+| `DEMO_MAX_FILES_PER_REQUEST` | Maximum files per anonymous demo upload request. |
+| `DEMO_MAX_DOCS_PER_SESSION` | Maximum live uploaded documents per anonymous demo session. |
+| `DEMO_UPLOADS_PER_HOUR` | Anonymous upload requests allowed per session per hour. |
+| `DEMO_QUERIES_PER_HOUR` | Anonymous query requests allowed per session per hour. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
 | `EMBEDDING_DEVICE` | CPU-only for this project. Keep this as `cpu`. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |

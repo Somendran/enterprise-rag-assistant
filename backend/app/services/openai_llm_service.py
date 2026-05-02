@@ -24,7 +24,22 @@ def _build_client() -> OpenAI:
 
 
 def _extract_text_from_response(response) -> str:
-    # SDK returns response.choices[0].message.content in chat completions.
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return str(output_text).strip()
+
+    output = getattr(response, "output", None) or []
+    parts: list[str] = []
+    for item in output:
+        content_items = getattr(item, "content", None) or []
+        for content in content_items:
+            text_value = getattr(content, "text", None)
+            if text_value:
+                parts.append(str(text_value))
+    if parts:
+        return "".join(parts).strip()
+
+    # Backward-compatible extraction for the legacy Chat Completions fallback.
     choices = getattr(response, "choices", None) or []
     if not choices:
         return ""
@@ -42,7 +57,7 @@ def generate_response(
     max_tokens: int,
     temperature: float = 0.2,
 ) -> str:
-    """Generate grounded output using OpenAI Chat Completions.
+    """Generate grounded output using the OpenAI Responses API.
 
     Retries at most once and only for network/timeout faults.
     """
@@ -50,33 +65,30 @@ def generate_response(
     model = settings.openai_model
     attempts = max(1, int(settings.openai_network_retry_attempts) + 1)
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You answer questions using only provided context. If context is insufficient, answer exactly: I don't know.",
-        },
-        {"role": "user", "content": prompt},
-    ]
+    instructions = (
+        "You answer questions using only provided context. "
+        "If context is insufficient, answer exactly: I don't know."
+    )
 
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         start = time.perf_counter()
         try:
-            response = client.chat.completions.create(
+            response = client.responses.create(
                 model=model,
-                messages=messages,
-                max_tokens=max(1, int(max_tokens)),
+                instructions=instructions,
+                input=prompt,
+                max_output_tokens=max(1, int(max_tokens)),
                 temperature=float(temperature),
-                stream=False,
             )
             latency_ms = (time.perf_counter() - start) * 1000.0
             answer = _extract_text_from_response(response)
             usage = getattr(response, "usage", None)
-            prompt_tokens = getattr(usage, "prompt_tokens", None) if usage is not None else None
-            completion_tokens = getattr(usage, "completion_tokens", None) if usage is not None else None
+            prompt_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+            completion_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
 
             logger.info(
-                "LLM used=openai model=%s latency_ms=%.1f tokens_in=%s tokens_out=%s response_empty=%s",
+                "LLM used=openai-responses model=%s latency_ms=%.1f tokens_in=%s tokens_out=%s response_empty=%s",
                 model,
                 latency_ms,
                 prompt_tokens,
@@ -118,7 +130,7 @@ def stream_response(
     max_tokens: int,
     temperature: float = 0.2,
 ) -> Iterator[str]:
-    """Stream grounded output using OpenAI Chat Completions.
+    """Stream grounded output using the OpenAI Responses API.
 
     Retries at most once and only for network/timeout faults.
     Yields plain text chunks as they arrive.
@@ -127,44 +139,41 @@ def stream_response(
     model = settings.openai_model
     attempts = max(1, int(settings.openai_network_retry_attempts) + 1)
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You answer questions using only provided context. If context is insufficient, answer exactly: I don't know.",
-        },
-        {"role": "user", "content": prompt},
-    ]
+    instructions = (
+        "You answer questions using only provided context. "
+        "If context is insufficient, answer exactly: I don't know."
+    )
 
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         start = time.perf_counter()
         chunk_count = 0
         try:
-            stream = client.chat.completions.create(
+            stream = client.responses.create(
                 model=model,
-                messages=messages,
-                max_tokens=max(1, int(max_tokens)),
+                instructions=instructions,
+                input=prompt,
+                max_output_tokens=max(1, int(max_tokens)),
                 temperature=float(temperature),
                 stream=True,
             )
 
             for event in stream:
-                choices = getattr(event, "choices", None) or []
-                if not choices:
+                event_type = str(getattr(event, "type", "") or "")
+                if event_type == "error":
+                    error = getattr(event, "error", None)
+                    raise RuntimeError(str(error or "OpenAI streaming error"))
+                if event_type != "response.output_text.delta":
                     continue
-                delta = getattr(choices[0], "delta", None)
-                if delta is None:
+                text = str(getattr(event, "delta", "") or "")
+                if not text:
                     continue
-                content = getattr(delta, "content", None)
-                if not content:
-                    continue
-                text = str(content)
                 chunk_count += 1
                 yield text
 
             latency_ms = (time.perf_counter() - start) * 1000.0
             logger.info(
-                "LLM used=openai model=%s latency_ms=%.1f stream_chunks=%d",
+                "LLM used=openai-responses model=%s latency_ms=%.1f stream_chunks=%d",
                 model,
                 latency_ms,
                 chunk_count,

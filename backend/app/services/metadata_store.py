@@ -52,13 +52,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             vision_calls_used INTEGER NOT NULL DEFAULT 0,
             owner_user_id TEXT NOT NULL DEFAULT '',
             visibility TEXT NOT NULL DEFAULT 'shared',
-            allowed_roles_json TEXT NOT NULL DEFAULT '[]'
+            allowed_roles_json TEXT NOT NULL DEFAULT '[]',
+            is_demo INTEGER NOT NULL DEFAULT 0,
+            demo_session_id TEXT NOT NULL DEFAULT '',
+            expires_at INTEGER NOT NULL DEFAULT 0
         )
         """
     )
     _ensure_column(conn, "documents", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "documents", "visibility", "TEXT NOT NULL DEFAULT 'shared'")
     _ensure_column(conn, "documents", "allowed_roles_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "documents", "is_demo", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "documents", "demo_session_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "documents", "expires_at", "INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS feedback (
@@ -182,6 +188,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at DESC)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            key TEXT NOT NULL,
+            action TEXT NOT NULL,
+            window_start INTEGER NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (key, action)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -240,6 +258,9 @@ def upsert_document(
     owner_user_id: str = "",
     visibility: str = "shared",
     allowed_roles: list[str] | None = None,
+    is_demo: bool = False,
+    demo_session_id: str = "",
+    expires_at: int = 0,
 ) -> None:
     normalized_roles = sorted({str(role).strip().lower() for role in (allowed_roles or []) if str(role).strip()})
     normalized_visibility = visibility if visibility in {"private", "shared", "role"} else "shared"
@@ -249,9 +270,9 @@ def upsert_document(
             INSERT INTO documents (
                 file_hash, filename, chunk_count, document_id, embedding_model,
                 indexed_at, parsing_method, upload_path, upload_status, vision_calls_used,
-                owner_user_id, visibility, allowed_roles_json
+                owner_user_id, visibility, allowed_roles_json, is_demo, demo_session_id, expires_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_hash) DO UPDATE SET
                 filename = excluded.filename,
                 chunk_count = excluded.chunk_count,
@@ -267,7 +288,10 @@ def upsert_document(
                     ELSE documents.owner_user_id
                 END,
                 visibility = excluded.visibility,
-                allowed_roles_json = excluded.allowed_roles_json
+                allowed_roles_json = excluded.allowed_roles_json,
+                is_demo = excluded.is_demo,
+                demo_session_id = excluded.demo_session_id,
+                expires_at = excluded.expires_at
             """,
             (
                 file_hash,
@@ -283,6 +307,9 @@ def upsert_document(
                 owner_user_id,
                 normalized_visibility,
                 json.dumps(normalized_roles),
+                1 if is_demo else 0,
+                demo_session_id,
+                int(expires_at or 0),
             ),
         )
 
@@ -311,6 +338,43 @@ def list_documents() -> list[dict[str, Any]]:
 def list_documents_for_user(user: dict[str, Any]) -> list[dict[str, Any]]:
     documents = list_documents()
     return [doc for doc in documents if can_user_access_document(user, doc)]
+
+
+def count_documents_for_owner(owner_user_id: str, *, include_expired: bool = False) -> int:
+    now = int(time.time())
+    with _connect() as conn:
+        if include_expired:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM documents WHERE owner_user_id = ?",
+                (owner_user_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM documents
+                WHERE owner_user_id = ?
+                  AND (expires_at = 0 OR expires_at > ?)
+                """,
+                (owner_user_id, now),
+            ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def list_expired_demo_documents(now: int | None = None) -> list[dict[str, Any]]:
+    cutoff = int(now if now is not None else time.time())
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM documents
+            WHERE is_demo = 1
+              AND expires_at > 0
+              AND expires_at <= ?
+            """,
+            (cutoff,),
+        ).fetchall()
+    return [_decode_document_row(row) for row in rows]
 
 
 def delete_document(file_hash: str) -> dict[str, Any] | None:
@@ -518,6 +582,59 @@ def list_users() -> list[dict[str, Any]]:
 
 def allowed_file_hashes_for_user(user: dict[str, Any]) -> list[str]:
     return [str(doc["file_hash"]) for doc in list_documents_for_user(user)]
+
+
+def check_rate_limit(
+    *,
+    key: str,
+    action: str,
+    limit: int,
+    window_seconds: int = 3600,
+) -> dict[str, Any]:
+    normalized_key = str(key or "").strip()
+    normalized_action = str(action or "").strip()
+    resolved_limit = max(1, int(limit))
+    resolved_window = max(60, int(window_seconds))
+    now = int(time.time())
+    window_start = now - (now % resolved_window)
+
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT window_start, count
+            FROM rate_limits
+            WHERE key = ? AND action = ?
+            """,
+            (normalized_key, normalized_action),
+        ).fetchone()
+
+        current_count = 0
+        if row and int(row["window_start"]) == window_start:
+            current_count = int(row["count"])
+
+        allowed = current_count < resolved_limit
+        next_count = current_count + 1 if allowed else current_count
+        conn.execute(
+            """
+            INSERT INTO rate_limits (key, action, window_start, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key, action) DO UPDATE SET
+                window_start = excluded.window_start,
+                count = excluded.count
+            """,
+            (normalized_key, normalized_action, window_start, next_count),
+        )
+        conn.execute(
+            "DELETE FROM rate_limits WHERE window_start < ?",
+            (window_start - resolved_window,),
+        )
+
+    return {
+        "allowed": allowed,
+        "limit": resolved_limit,
+        "remaining": max(0, resolved_limit - next_count),
+        "reset_at": window_start + resolved_window,
+    }
 
 
 def record_audit_event(

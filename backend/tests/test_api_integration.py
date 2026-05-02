@@ -11,6 +11,7 @@ sys.modules.setdefault("app.services.rag_pipeline", rag_pipeline_stub)
 vector_store_stub = types.ModuleType("app.services.vector_store")
 vector_store_stub.load_store = lambda: None
 vector_store_stub.add_documents = lambda chunks: None
+vector_store_stub.cleanup_expired_demo_documents = lambda: 0
 vector_store_stub.is_document_indexed = lambda file_hash: False
 vector_store_stub.get_indexed_document = lambda file_hash: None
 vector_store_stub.list_indexed_documents = lambda: []
@@ -67,6 +68,9 @@ metadata_store_stub.get_user_for_token = lambda token: None
 metadata_store_stub.can_user_access_document = lambda user, document, write=False: True
 metadata_store_stub.list_documents_for_user = lambda user: []
 metadata_store_stub.allowed_file_hashes_for_user = lambda user: []
+metadata_store_stub.check_rate_limit = lambda **kwargs: {"allowed": True, "remaining": 1, "limit": kwargs.get("limit", 1), "reset_at": 0}
+metadata_store_stub.count_documents_for_owner = lambda *args, **kwargs: 0
+metadata_store_stub.list_expired_demo_documents = lambda *args, **kwargs: []
 metadata_store_stub.record_audit_event = lambda **kwargs: {}
 metadata_store_stub.list_audit_events = lambda limit=50: []
 metadata_store_stub.create_chat_session = lambda session_id, title, user_id="": {
@@ -99,6 +103,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.client = TestClient(app)
         self.original_api_key = settings.app_api_key
         self.original_enable_user_auth = settings.enable_user_auth
+        self.original_public_demo_mode = settings.public_demo_mode
         self.original_run_rag_pipeline = query_module.run_rag_pipeline
         self.original_get_indexed_document = upload_module.get_indexed_document
         self.original_delete_indexed_document = upload_module.delete_indexed_document
@@ -106,10 +111,12 @@ class ApiIntegrationTests(unittest.TestCase):
         self.original_list_document_chunks = upload_module.list_document_chunks
 
         settings.enable_user_auth = False
+        settings.public_demo_mode = False
 
     def tearDown(self):
         settings.app_api_key = self.original_api_key
         settings.enable_user_auth = self.original_enable_user_auth
+        settings.public_demo_mode = self.original_public_demo_mode
         query_module.run_rag_pipeline = self.original_run_rag_pipeline
         upload_module.get_indexed_document = self.original_get_indexed_document
         upload_module.delete_indexed_document = self.original_delete_indexed_document
@@ -213,6 +220,30 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["document_count"], 0)
+
+    def test_public_demo_session_can_list_files_without_login(self):
+        settings.enable_user_auth = True
+        settings.public_demo_mode = True
+        settings.app_api_key = "secret"
+
+        response = self.client.get(
+            "/knowledge-base/files",
+            headers={"X-Demo-Session-Id": "demo-session-1234567890"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_public_demo_session_cannot_call_admin_overview(self):
+        settings.enable_user_auth = True
+        settings.public_demo_mode = True
+        settings.app_api_key = "secret"
+
+        response = self.client.get(
+            "/admin/overview",
+            headers={"X-Demo-Session-Id": "demo-session-1234567890"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_upload_rejects_bad_pdf_bytes_before_ingestion(self):
         settings.app_api_key = ""

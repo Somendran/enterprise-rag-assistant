@@ -236,6 +236,9 @@ def register_indexed_document(
     owner_user_id: str = "",
     visibility: str = "shared",
     allowed_roles: list[str] | None = None,
+    is_demo: bool = False,
+    demo_session_id: str = "",
+    expires_at: int = 0,
 ) -> None:
     """Persist hash and document metadata for duplicate prevention."""
     metadata_store.upsert_document(
@@ -252,6 +255,9 @@ def register_indexed_document(
         owner_user_id=owner_user_id,
         visibility=visibility,
         allowed_roles=allowed_roles,
+        is_demo=is_demo,
+        demo_session_id=demo_session_id,
+        expires_at=expires_at,
     )
 
 
@@ -609,3 +615,25 @@ def reset_vector_store() -> bool:
         _reset_persisted_index(index_path)
         metadata_store.clear_documents()
         return existed
+
+
+def cleanup_expired_demo_documents() -> int:
+    """Remove expired public-demo documents from metadata, FAISS, and uploads."""
+    expired = metadata_store.list_expired_demo_documents()
+    removed = 0
+    for item in expired:
+        file_hash = str(item.get("file_hash", ""))
+        if not file_hash:
+            continue
+        upload_path = str(item.get("upload_path", ""))
+        try:
+            delete_indexed_document(file_hash)
+        except Exception:
+            metadata_store.delete_document(file_hash)
+        if upload_path:
+            try:
+                Path(upload_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        removed += 1
+    return removed

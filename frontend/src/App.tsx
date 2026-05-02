@@ -20,6 +20,8 @@ import './App.css';
 // API Configuration
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const API_KEY = import.meta.env.VITE_API_KEY || '';
+const PUBLIC_DEMO_MODE = import.meta.env.VITE_PUBLIC_DEMO_MODE === 'true';
+const DEMO_SESSION_STORAGE_KEY = 'ragit_demo_session_id';
 const API_HEADERS: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
 const AUTH_TOKEN_STORAGE_KEY = 'ragit_auth_token';
 const RESET_REQUEST_TIMEOUT_MS = 15000;
@@ -28,6 +30,17 @@ const STARTER_PROMPTS = [
   'What are the vendor onboarding steps?',
   'Where is the SLA escalation path documented?',
 ];
+
+function getDemoSessionId(): string {
+  if (!PUBLIC_DEMO_MODE) return '';
+  const existing = window.localStorage.getItem(DEMO_SESSION_STORAGE_KEY);
+  if (existing) return existing;
+  const bytes = new Uint8Array(24);
+  window.crypto.getRandomValues(bytes);
+  const generated = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, generated);
+  return generated;
+}
 
 interface Source {
   file_hash?: string | null;
@@ -279,9 +292,11 @@ function getStoredAuthToken(): string {
 }
 
 function buildApiHeaders(token: string): Record<string, string> {
+  const demoSessionId = getDemoSessionId();
   return {
     ...API_HEADERS,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(demoSessionId ? { 'X-Demo-Session-Id': demoSessionId } : {}),
   };
 }
 
@@ -394,7 +409,7 @@ function App() {
   const shouldAutoScrollRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const apiHeaders = React.useMemo(() => buildApiHeaders(authToken), [authToken]);
-  const canUseApi = Boolean(authStatus && (!authStatus.auth_enabled || authUser || API_KEY));
+  const canUseApi = Boolean(authStatus && (PUBLIC_DEMO_MODE || !authStatus.auth_enabled || authUser || API_KEY));
 
   // Auto-scroll only when user is already near bottom.
   useEffect(() => {
@@ -455,7 +470,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!authStatus || (!authToken && !API_KEY)) return;
+    if (PUBLIC_DEMO_MODE || !authStatus || (!authToken && !API_KEY)) return;
     const loadCurrentUser = async () => {
       try {
         const response = await axios.get<{ user: AuthUser }>(`${API_BASE}/auth/me`, {
@@ -532,7 +547,7 @@ function App() {
   }, [canUseApi, loadIndexedFiles]);
 
   const loadChatSessions = useCallback(async () => {
-    if (!canUseApi) return;
+    if (!canUseApi || PUBLIC_DEMO_MODE) return;
     try {
       const response = await axios.get<{ sessions: ChatSession[] }>(
         `${API_BASE}/chat/sessions`,
@@ -545,7 +560,7 @@ function App() {
   }, [apiHeaders, canUseApi]);
 
   useEffect(() => {
-    if (!canUseApi) return;
+    if (!canUseApi || PUBLIC_DEMO_MODE) return;
     void loadChatSessions();
   }, [canUseApi, loadChatSessions]);
 
@@ -809,7 +824,7 @@ function App() {
     e.preventDefault();
     if (!inputTitle.trim() || isQuerying) return;
 
-    const sessionId = await ensureChatSession();
+    const sessionId = PUBLIC_DEMO_MODE ? '' : await ensureChatSession();
     const userMsg: Message = { id: Date.now().toString(), role: 'user', content: inputTitle };
     const assistantId = (Date.now() + 1).toString();
     let assistantDraft = '';
@@ -822,7 +837,7 @@ function App() {
     ]);
     setInputTitle('');
     setIsQuerying(true);
-    void saveChatMessage(sessionId, userMsg);
+    if (sessionId) void saveChatMessage(sessionId, userMsg);
 
     try {
       const response = await fetch(`${API_BASE}/query/stream`, {
@@ -903,7 +918,7 @@ function App() {
         }
       }
 
-      if (finalAssistant) {
+      if (finalAssistant && sessionId) {
         void saveChatMessage(sessionId, finalAssistant);
       }
     } catch (error) {
@@ -1115,7 +1130,7 @@ function App() {
     );
   }
 
-  if (authStatus?.auth_enabled && !authUser && !API_KEY) {
+  if (!PUBLIC_DEMO_MODE && authStatus?.auth_enabled && !authUser && !API_KEY) {
     return (
       <div className="auth-shell">
         <form className="auth-card" onSubmit={handleAuthSubmit}>
@@ -1166,7 +1181,7 @@ function App() {
         <div className="brand-block">
           <h1>RAGiT</h1>
           <p>Grounded knowledge workspace</p>
-          {authUser && (
+          {authUser && !PUBLIC_DEMO_MODE && (
             <div className="user-chip">
               <span>{authUser.display_name || authUser.email}</span>
               <small>{authUser.role}</small>
@@ -1175,6 +1190,7 @@ function App() {
           )}
         </div>
 
+        {!PUBLIC_DEMO_MODE && (
         <div className="sessions-panel">
           <div className="admin-header">
             <h2>Chats</h2>
@@ -1197,6 +1213,7 @@ function App() {
             </div>
           )}
         </div>
+        )}
 
         <div
           className={`upload-dropzone ${isDragActive ? 'drag-active' : ''}`}
@@ -1237,15 +1254,17 @@ function App() {
             </ol>
           )}
 
-          <button
-            type="button"
-            className="reset-kb-btn"
-            onClick={handleResetKnowledgeBase}
-            disabled={isResetting || isUploading}
-          >
-            {isResetting ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
-            {isResetting ? 'Resetting...' : 'Reset Knowledge Base'}
-          </button>
+          {!PUBLIC_DEMO_MODE && (
+            <button
+              type="button"
+              className="reset-kb-btn"
+              onClick={handleResetKnowledgeBase}
+              disabled={isResetting || isUploading}
+            >
+              {isResetting ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+              {isResetting ? 'Resetting...' : 'Reset Knowledge Base'}
+            </button>
+          )}
         </div>
 
         <div className="knowledge-list">
@@ -1274,46 +1293,51 @@ function App() {
                     <Eye size={13} />
                     Chunks
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => handleReindexKnowledgeFile(file)}
-                    disabled={Boolean(documentActionId) || isUploading || isResetting}
-                  >
-                    {documentActionId === `reindex:${file.fileHash}` ? (
-                      <Loader2 size={13} className="animate-spin" />
-                    ) : (
-                      <RefreshCw size={13} />
-                    )}
-                    Reindex
-                  </button>
-                  <select
-                    value={file.visibility}
-                    onChange={(event) => void handleUpdateDocumentVisibility(file, event.target.value)}
-                    disabled={Boolean(documentActionId) || isUploading || isResetting}
-                    aria-label={`Access for ${file.filename}`}
-                  >
-                    <option value="shared">Shared</option>
-                    <option value="private">Private</option>
-                  </select>
-                  <button
-                    type="button"
-                    className="danger"
-                    onClick={() => handleDeleteKnowledgeFile(file)}
-                    disabled={Boolean(documentActionId) || isUploading || isResetting}
-                  >
-                    {documentActionId === `delete:${file.fileHash}` ? (
-                      <Loader2 size={13} className="animate-spin" />
-                    ) : (
-                      <Trash2 size={13} />
-                    )}
-                    Delete
-                  </button>
+                  {!PUBLIC_DEMO_MODE && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleReindexKnowledgeFile(file)}
+                        disabled={Boolean(documentActionId) || isUploading || isResetting}
+                      >
+                        {documentActionId === `reindex:${file.fileHash}` ? (
+                          <Loader2 size={13} className="animate-spin" />
+                        ) : (
+                          <RefreshCw size={13} />
+                        )}
+                        Reindex
+                      </button>
+                      <select
+                        value={file.visibility}
+                        onChange={(event) => void handleUpdateDocumentVisibility(file, event.target.value)}
+                        disabled={Boolean(documentActionId) || isUploading || isResetting}
+                        aria-label={`Access for ${file.filename}`}
+                      >
+                        <option value="shared">Shared</option>
+                        <option value="private">Private</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => handleDeleteKnowledgeFile(file)}
+                        disabled={Boolean(documentActionId) || isUploading || isResetting}
+                      >
+                        {documentActionId === `delete:${file.fileHash}` ? (
+                          <Loader2 size={13} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={13} />
+                        )}
+                        Delete
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             ))
           )}
         </div>
 
+        {!PUBLIC_DEMO_MODE && (
         <div className="admin-panel">
           <div className="admin-header">
             <h2>Debug</h2>
@@ -1370,6 +1394,7 @@ function App() {
             ))}
           </div>
         </div>
+        )}
       </aside>
 
       <main className="workspace-pane">
@@ -1410,7 +1435,7 @@ function App() {
                 <div key={msg.id} className={`chat-row ${msg.role}`}>
                   <div className={`chat-bubble ${msg.role}`}>
                     {msg.role === 'assistant' ? <ReactMarkdown>{msg.content}</ReactMarkdown> : <p>{msg.content}</p>}
-                    {msg.role === 'assistant' && msg.content && (
+                    {msg.role === 'assistant' && msg.content && !PUBLIC_DEMO_MODE && (
                       <div className="feedback-row">
                         <button type="button" onClick={() => void submitFeedback(msg, 'helpful')}>
                           <Heart size={13} />
