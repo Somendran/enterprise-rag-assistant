@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, status
+import hashlib
+import re
+
+from fastapi import Depends, Header, HTTPException, Request, status
 
 from app.config import settings
 from app.services import metadata_store
@@ -15,6 +18,7 @@ class AuthContext:
     display_name: str
     role: str
     is_system_admin: bool = False
+    is_demo: bool = False
 
     def as_user(self) -> dict:
         return {
@@ -23,6 +27,7 @@ class AuthContext:
             "display_name": self.display_name,
             "role": self.role,
             "is_system_admin": self.is_system_admin,
+            "is_demo": self.is_demo,
         }
 
 
@@ -33,6 +38,27 @@ SYSTEM_ADMIN = AuthContext(
     role="admin",
     is_system_admin=True,
 )
+
+
+def _normalize_demo_session_id(raw: str | None) -> str:
+    if not isinstance(raw, str):
+        return ""
+    value = raw.strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", value):
+        return ""
+    return value
+
+
+def _demo_user(raw_session_id: str) -> AuthContext:
+    digest = hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()
+    session_id = digest[:32]
+    return AuthContext(
+        id=f"demo:{session_id}",
+        email=f"demo-{session_id[:8]}@public-demo.local",
+        display_name="Public demo visitor",
+        role="demo",
+        is_demo=True,
+    )
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -72,8 +98,10 @@ async def require_api_key(
 
 
 async def require_user(
+    request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     authorization: str | None = Header(default=None),
+    x_demo_session_id: str | None = Header(default=None, alias="X-Demo-Session-Id"),
 ) -> AuthContext:
     """Require either a valid API key or a logged-in local user."""
     if not settings.enable_user_auth:
@@ -83,6 +111,11 @@ async def require_user(
 
     if _api_key_is_valid(x_api_key, authorization):
         return SYSTEM_ADMIN
+
+    if settings.public_demo_mode:
+        demo_session_id = _normalize_demo_session_id(x_demo_session_id)
+        if demo_session_id:
+            return _demo_user(demo_session_id)
 
     token = _extract_bearer_token(authorization)
     if token:

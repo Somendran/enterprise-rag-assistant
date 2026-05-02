@@ -16,9 +16,19 @@ class Settings(BaseSettings):
     allowed_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     enable_user_auth: bool = True
     auth_token_ttl_hours: int = 24
+    public_demo_mode: bool = False
+    demo_max_upload_mb: int = 5
+    demo_max_pages: int = 20
+    demo_max_files_per_request: int = 2
+    demo_max_docs_per_session: int = 3
+    demo_uploads_per_hour: int = 3
+    demo_queries_per_hour: int = 30
+    demo_uploads_per_hour_ip: int = 10
+    demo_queries_per_hour_ip: int = 120
+    demo_doc_ttl_hours: int = 24
 
     # Model identifiers
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model: str = "sentence-transformers/all-mpnet-base-v2"
     embedding_device: str = "cpu"
     # Local Ollama generation defaults.
     local_llm_endpoint: str = "http://localhost:11434/api/generate"
@@ -43,8 +53,8 @@ class Settings(BaseSettings):
     # OpenAI generation (optional primary path)
     use_openai: bool = False
     openai_api_key: str = ""
-    openai_model: str = "gpt-4.1-mini"
-    openai_max_tokens: int = 300
+    openai_model: str = "gpt-5.4-mini"
+    openai_max_tokens: int = 320
     openai_temperature: float = 0.2
     openai_timeout_seconds: int = 30
     openai_network_retry_attempts: int = 1
@@ -61,14 +71,14 @@ class Settings(BaseSettings):
 
     # Retrieval
     # Final number of chunks passed to the LLM after reranking.
-    retrieval_top_n: int = 5
+    retrieval_top_n: int = 6
     # How many candidates to gather before neural reranking.
-    retrieval_initial_top_k: int = 30
+    retrieval_initial_top_k: int = 40
     # Backward-compat alias used in some call paths.
-    retrieval_top_k: int = 5
+    retrieval_top_k: int = 6
     # Candidate chunks to collect before rerank-lite trims to retrieval_top_k.
     retrieval_candidate_k: int = 10
-    bm25_top_k: int = 20
+    bm25_top_k: int = 30
     bm25_weight: float = 0.25
     # Adaptive fast mode for simple questions.
     fast_mode_enabled: bool = True
@@ -86,7 +96,7 @@ class Settings(BaseSettings):
     answer_hard_refusal_threshold: float = 0.12
     low_confidence_min_chunk_score: float = 0.18
     # Keep context compact for local generation latency.
-    max_context_characters: int = 2200
+    max_context_characters: int = 6000
     # Structured ingestion + vision enrichment toggles.
     enable_docling: bool = True
     enable_ocr: bool = False

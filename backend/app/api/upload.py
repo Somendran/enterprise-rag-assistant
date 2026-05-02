@@ -8,10 +8,10 @@ import threading
 from uuid import uuid4
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile, File, status
 
 from app.api.security import AuthContext, require_admin, require_user
-from app.api.upload_validation import safe_pdf_filename, validate_pdf_upload
+from app.api.upload_validation import count_pdf_pages, safe_pdf_filename, validate_pdf_upload
 from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents, chunk_structured_blocks
 from app.services.ingestion.doc_parser import parse_document
@@ -20,6 +20,7 @@ from app.services.query_cache import clear_query_cache
 from app.services import metadata_store
 from app.services.vector_store import (
     add_documents,
+    cleanup_expired_demo_documents,
     delete_indexed_document,
     get_indexed_document,
     is_document_indexed,
@@ -45,6 +46,70 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_demo_rate_limit(current_user: AuthContext, request: Request, action: str) -> None:
+    if not current_user.is_demo:
+        return
+
+    session_limit = settings.demo_uploads_per_hour if action == "upload" else settings.demo_queries_per_hour
+    ip_limit = settings.demo_uploads_per_hour_ip if action == "upload" else settings.demo_queries_per_hour_ip
+    session_result = metadata_store.check_rate_limit(
+        key=current_user.id,
+        action=action,
+        limit=session_limit,
+    )
+    ip_result = metadata_store.check_rate_limit(
+        key=f"ip:{_client_ip(request)}",
+        action=action,
+        limit=ip_limit,
+    )
+    if not session_result["allowed"] or not ip_result["allowed"]:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Public demo limit reached. Please try again later.",
+        )
+
+
+def _assert_demo_upload_budget(current_user: AuthContext, request: Request, files: list[UploadFile]) -> None:
+    if not current_user.is_demo:
+        return
+
+    cleanup_expired_demo_documents()
+    if len(files) > max(1, int(settings.demo_max_files_per_request)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Public demo uploads are limited to {settings.demo_max_files_per_request} file(s) per request.",
+        )
+
+    current_count = metadata_store.count_documents_for_owner(current_user.id)
+    if current_count + len(files) > max(1, int(settings.demo_max_docs_per_session)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Public demo sessions are limited to {settings.demo_max_docs_per_session} uploaded document(s).",
+        )
+
+    _enforce_demo_rate_limit(current_user, request, "upload")
+
+
+def _demo_expiry(current_user: AuthContext) -> int:
+    if not current_user.is_demo:
+        return 0
+    return int(time.time()) + max(1, int(settings.demo_doc_ttl_hours)) * 3600
+
+
+def _demo_upload_limit_bytes(current_user: AuthContext) -> tuple[int, int]:
+    if current_user.is_demo:
+        max_mb = max(1, int(settings.demo_max_upload_mb))
+        return max_mb * 1024 * 1024, max_mb
+    return settings.max_upload_size_bytes, settings.max_upload_size_mb
 
 
 def _stored_upload_path(file_hash: str, filename: str) -> Path:
@@ -258,6 +323,9 @@ def _ingest_saved_files(
                 owner_user_id=current_user.id if current_user else "",
                 visibility=visibility,
                 allowed_roles=allowed_roles,
+                is_demo=bool(current_user.is_demo) if current_user else False,
+                demo_session_id=current_user.id if current_user and current_user.is_demo else "",
+                expires_at=_demo_expiry(current_user) if current_user else 0,
             )
             total_chunks_indexed += len(chunks)
             results.append(
@@ -307,6 +375,7 @@ def _ingest_saved_files(
 async def list_knowledge_base_files(
     current_user: AuthContext = Depends(require_user),
 ) -> KnowledgeBaseFilesResponse:
+    cleanup_expired_demo_documents()
     list_indexed_documents()
     files = metadata_store.list_documents_for_user(current_user.as_user())
     return KnowledgeBaseFilesResponse(files=files)
@@ -357,6 +426,11 @@ async def update_knowledge_base_file_permissions(
     request: DocumentPermissionsUpdateRequest,
     current_user: AuthContext = Depends(require_user),
 ) -> KnowledgeBaseFilesResponse:
+    if current_user.is_demo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public demo users cannot manage document permissions.",
+        )
     meta = get_indexed_document(file_hash)
     if meta is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
@@ -448,6 +522,11 @@ async def delete_knowledge_base_file(
     file_hash: str,
     current_user: AuthContext = Depends(require_user),
 ) -> DeleteKnowledgeBaseFileResponse:
+    if current_user.is_demo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public demo users cannot delete documents.",
+        )
     try:
         meta = get_indexed_document(file_hash)
         if meta is None:
@@ -504,6 +583,11 @@ async def reindex_knowledge_base_file(
     file_hash: str,
     current_user: AuthContext = Depends(require_user),
 ) -> UploadItemResult:
+    if current_user.is_demo:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public demo users cannot reindex documents.",
+        )
     meta = get_indexed_document(file_hash)
     if meta is None:
         raise HTTPException(
@@ -593,6 +677,7 @@ async def reindex_knowledge_base_file(
     ),
 )
 async def upload_document(
+    request: Request,
     files: list[UploadFile] = File(...),
     visibility: str = Form(default="shared"),
     allowed_roles: str = Form(default=""),
@@ -628,12 +713,13 @@ async def upload_document(
 
         try:
             content = await file.read()
+            max_bytes, max_mb = _demo_upload_limit_bytes(current_user)
             validation_error = validate_pdf_upload(
                 filename=file.filename,
                 content_type=file.content_type,
                 content=content,
-                max_upload_size_bytes=settings.max_upload_size_bytes,
-                max_upload_size_mb=settings.max_upload_size_mb,
+                max_upload_size_bytes=max_bytes,
+                max_upload_size_mb=max_mb,
             )
             if validation_error:
                 failed_results.append(
@@ -645,6 +731,29 @@ async def upload_document(
                     )
                 )
                 continue
+            if current_user.is_demo:
+                try:
+                    page_count = count_pdf_pages(content)
+                except ValueError as exc:
+                    failed_results.append(
+                        UploadItemResult(
+                            filename=file.filename or "unknown",
+                            chunks_indexed=0,
+                            status="failed",
+                            message=str(exc),
+                        )
+                    )
+                    continue
+                if page_count > max(1, int(settings.demo_max_pages)):
+                    failed_results.append(
+                        UploadItemResult(
+                            filename=file.filename or "unknown",
+                            chunks_indexed=0,
+                            status="failed",
+                            message=f"Public demo PDFs are limited to {settings.demo_max_pages} page(s).",
+                        )
+                    )
+                    continue
 
             file_hash = hashlib.sha256(content).hexdigest()
             document_id = hashlib.sha1(f"{safe_filename}:{file_hash}".encode("utf-8")).hexdigest()[:16]
@@ -670,7 +779,7 @@ async def upload_document(
                 )
             )
 
-    normalized_visibility = _normalize_visibility(visibility)
+    normalized_visibility = "private" if current_user.is_demo else _normalize_visibility(visibility)
     parsed_roles = _parse_allowed_roles(allowed_roles)
     response = _ingest_saved_files(
         saved_files,
@@ -688,13 +797,6 @@ async def upload_document(
         total_chunks_indexed,
     )
 
-    return UploadBatchResponse(
-        files=results,
-        total_files=len(files),
-        processed_files=processed_files,
-        total_chunks_indexed=total_chunks_indexed,
-        message=f"Upload completed. Processed {processed_files}/{len(files)} files.",
-    )
     metadata_store.record_audit_event(
         actor_user_id=current_user.id,
         actor_email=current_user.email,
@@ -706,7 +808,16 @@ async def upload_document(
             "total_chunks_indexed": total_chunks_indexed,
             "visibility": normalized_visibility,
             "allowed_roles": parsed_roles,
+            "public_demo": current_user.is_demo,
         },
+    )
+
+    return UploadBatchResponse(
+        files=results,
+        total_files=len(files),
+        processed_files=processed_files,
+        total_chunks_indexed=total_chunks_indexed,
+        message=f"Upload completed. Processed {processed_files}/{len(files)} files.",
     )
 
 
@@ -717,6 +828,7 @@ async def upload_document(
     summary="Upload PDFs and ingest them in the background",
 )
 async def upload_document_job(
+    request: Request,
     files: list[UploadFile] = File(...),
     visibility: str = Form(default="shared"),
     allowed_roles: str = Form(default=""),
@@ -727,11 +839,13 @@ async def upload_document_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No files received. Please upload at least one .pdf file.",
         )
+    _assert_demo_upload_budget(current_user, request, files)
+    _assert_demo_upload_budget(current_user, request, files)
 
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     job_id = uuid4().hex
-    normalized_visibility = _normalize_visibility(visibility)
+    normalized_visibility = "private" if current_user.is_demo else _normalize_visibility(visibility)
     parsed_roles = _parse_allowed_roles(allowed_roles)
     metadata_store.create_ingestion_job(job_id, total_files=len(files), created_by_user_id=current_user.id)
     saved_files: list[dict] = []
@@ -751,12 +865,13 @@ async def upload_document_job(
             continue
         try:
             content = await file.read()
+            max_bytes, max_mb = _demo_upload_limit_bytes(current_user)
             validation_error = validate_pdf_upload(
                 filename=file.filename,
                 content_type=file.content_type,
                 content=content,
-                max_upload_size_bytes=settings.max_upload_size_bytes,
-                max_upload_size_mb=settings.max_upload_size_mb,
+                max_upload_size_bytes=max_bytes,
+                max_upload_size_mb=max_mb,
             )
             if validation_error:
                 early_results.append(
@@ -768,6 +883,29 @@ async def upload_document_job(
                     )
                 )
                 continue
+            if current_user.is_demo:
+                try:
+                    page_count = count_pdf_pages(content)
+                except ValueError as exc:
+                    early_results.append(
+                        UploadItemResult(
+                            filename=file.filename or "unknown",
+                            chunks_indexed=0,
+                            status="failed",
+                            message=str(exc),
+                        )
+                    )
+                    continue
+                if page_count > max(1, int(settings.demo_max_pages)):
+                    early_results.append(
+                        UploadItemResult(
+                            filename=file.filename or "unknown",
+                            chunks_indexed=0,
+                            status="failed",
+                            message=f"Public demo PDFs are limited to {settings.demo_max_pages} page(s).",
+                        )
+                    )
+                    continue
             file_hash = hashlib.sha256(content).hexdigest()
             document_id = hashlib.sha1(f"{safe_filename}:{file_hash}".encode("utf-8")).hexdigest()[:16]
             file_path = _stored_upload_path(file_hash, safe_filename)
@@ -834,6 +972,7 @@ async def upload_document_job(
                     "total_chunks_indexed": total_chunks,
                     "visibility": normalized_visibility,
                     "allowed_roles": parsed_roles,
+                    "public_demo": current_user.is_demo,
                 },
             )
         except Exception as exc:

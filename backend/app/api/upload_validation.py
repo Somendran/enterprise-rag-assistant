@@ -1,6 +1,7 @@
 """Pure upload validation helpers."""
 
 from pathlib import Path
+from io import BytesIO
 
 PDF_MAGIC = b"%PDF"
 ALLOWED_PDF_CONTENT_TYPES = {
@@ -51,3 +52,13 @@ def validate_pdf_upload(
         return "Uploaded file does not look like a valid PDF."
 
     return None
+
+
+def count_pdf_pages(content: bytes) -> int:
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(content))
+        return len(reader.pages)
+    except Exception as exc:
+        raise ValueError(f"Could not read PDF page count: {exc}") from exc

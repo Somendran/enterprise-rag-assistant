@@ -4,7 +4,7 @@ import unittest
 from fastapi import HTTPException
 
 from app.api.security import require_api_key
-from app.api.upload_validation import safe_pdf_filename, validate_pdf_upload
+from app.api.upload_validation import count_pdf_pages, safe_pdf_filename, validate_pdf_upload
 from app.config import settings
 
 
@@ -35,6 +35,10 @@ class UploadValidationTests(unittest.TestCase):
             max_upload_size_mb=1,
         )
         self.assertIsNone(error)
+
+    def test_count_pdf_pages_rejects_invalid_pdf(self):
+        with self.assertRaises(ValueError):
+            count_pdf_pages(b"%PDF-1.7\nnot really a pdf")
 
 
 class ApiKeySecurityTests(unittest.TestCase):

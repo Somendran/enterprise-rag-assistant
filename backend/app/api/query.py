@@ -4,12 +4,13 @@ import time
 import json
 import queue
 import threading
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.security import AuthContext, require_user
 from app.services import metadata_store
 from app.services.rag_pipeline import run_rag_pipeline
+from app.services.vector_store import cleanup_expired_demo_documents
 from app.models.schemas import QueryRequest, QueryResponse
 from app.config import settings
 from app.utils.logger import get_logger
@@ -17,6 +18,41 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_demo_query_rate_limit(current_user: AuthContext, request: Request) -> None:
+    if not current_user.is_demo:
+        return
+    session_result = metadata_store.check_rate_limit(
+        key=current_user.id,
+        action="query",
+        limit=settings.demo_queries_per_hour,
+    )
+    ip_result = metadata_store.check_rate_limit(
+        key=f"ip:{_client_ip(request)}",
+        action="query",
+        limit=settings.demo_queries_per_hour_ip,
+    )
+    if not session_result["allowed"] or not ip_result["allowed"]:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Public demo query limit reached. Please try again later.",
+        )
+
+
+def _diagnostics_for_user(current_user: AuthContext, diagnostics):
+    if current_user.is_demo:
+        return None
+    if not (settings.enable_retrieval_diagnostics and (current_user.role == "admin" or current_user.is_system_admin)):
+        return None
+    return diagnostics
 
 
 @router.post(
@@ -31,12 +67,15 @@ router = APIRouter()
 )
 async def query_knowledge_base(
     request: QueryRequest,
+    http_request: Request,
     current_user: AuthContext = Depends(require_user),
 ) -> QueryResponse:
     """Answer a question using the RAG pipeline."""
 
     start_time = time.perf_counter()
     logger.info(f"Query received: '{request.question[:100]}'")
+    cleanup_expired_demo_documents()
+    _enforce_demo_query_rate_limit(current_user, http_request)
 
     try:
         allowed_file_hashes = metadata_store.allowed_file_hashes_for_user(current_user.as_user())
@@ -96,7 +135,7 @@ async def query_knowledge_base(
         sources=result.sources,
         confidence_score=result.confidence_score,
         confidence_level=result.confidence_level,
-        diagnostics=result.diagnostics if settings.enable_retrieval_diagnostics else None,
+        diagnostics=_diagnostics_for_user(current_user, result.diagnostics),
     )
 
 
@@ -108,6 +147,7 @@ async def query_knowledge_base(
 )
 async def query_knowledge_base_stream(
     request: QueryRequest,
+    http_request: Request,
     current_user: AuthContext = Depends(require_user),
 ) -> StreamingResponse:
     """Answer a question using streaming SSE events: chunk, done, error."""
@@ -126,6 +166,8 @@ async def query_knowledge_base_stream(
 
         try:
             logger.info("Streaming query received: '%s'", request.question[:100])
+            cleanup_expired_demo_documents()
+            _enforce_demo_query_rate_limit(current_user, http_request)
             allowed_file_hashes = metadata_store.allowed_file_hashes_for_user(current_user.as_user())
             result = run_rag_pipeline(
                 request.question,
@@ -140,12 +182,13 @@ async def query_knowledge_base_stream(
                 result.confidence_score,
                 result.confidence_level,
             )
+            diagnostics = _diagnostics_for_user(current_user, result.diagnostics)
             payload = {
                 "answer": result.answer,
                 "sources": [src.model_dump() for src in result.sources],
                 "confidence_score": result.confidence_score,
                 "confidence_level": result.confidence_level,
-                "diagnostics": result.diagnostics.model_dump() if settings.enable_retrieval_diagnostics else None,
+                "diagnostics": diagnostics.model_dump() if diagnostics else None,
             }
             metadata_store.record_audit_event(
                 actor_user_id=current_user.id,
