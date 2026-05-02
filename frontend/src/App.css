@@ -38,6 +38,93 @@
   margin-bottom: 18px;
 }
 
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #edf1f4;
+  padding: 20px;
+}
+
+.auth-card {
+  width: min(100%, 380px);
+  border: 1px solid #d0d8e2;
+  border-radius: 8px;
+  background: #f6f8fa;
+  padding: 22px;
+}
+
+.auth-card h1 {
+  color: #20252d;
+  font-size: 2rem;
+  margin-bottom: 6px;
+}
+
+.auth-card p {
+  color: #626e7f;
+  margin-bottom: 14px;
+}
+
+.auth-card label {
+  display: block;
+  color: #2d3a4b;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.auth-card input {
+  width: 100%;
+  border: 1px solid #c9d3df;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313f;
+  margin-top: 5px;
+  padding: 9px 10px;
+}
+
+.auth-card button,
+.user-chip button {
+  border: 1px solid #c9d3df;
+  background: #ffffff;
+  color: #2d3a4b;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.auth-card button {
+  width: 100%;
+}
+
+.auth-error {
+  color: #a72f2f;
+}
+
+.user-chip {
+  border: 1px solid #d0d8e2;
+  border-radius: 8px;
+  background: #f4f7fa;
+  padding: 8px;
+  margin-bottom: 14px;
+}
+
+.user-chip span,
+.user-chip small {
+  display: block;
+  color: #2d3a4b;
+  overflow-wrap: anywhere;
+}
+
+.user-chip small {
+  color: #6f7988;
+  margin: 2px 0 7px;
+}
+
 .upload-dropzone h2 {
   font-size: 1.6rem;
   margin-bottom: 10px;
@@ -189,6 +276,16 @@
   font-weight: 600;
 }
 
+.kb-actions select {
+  border: 1px solid #c9d3df;
+  background: #ffffff;
+  color: #2d3a4b;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
 .kb-actions button.danger {
   border-color: #d8b5b5;
   color: #8d2f2f;
@@ -306,6 +403,28 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
+}
+
+.audit-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.audit-item {
+  border: 1px solid #ccd5df;
+  border-radius: 8px;
+  background: #f6f8fa;
+  padding: 7px;
+}
+
+.audit-item strong,
+.audit-item span {
+  display: block;
+  color: #344154;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .eval-run {

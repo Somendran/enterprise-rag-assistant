@@ -62,6 +62,30 @@ metadata_store_stub.admin_summary = lambda: {
     "recent_feedback": [],
     "metadata_db_path": "memory",
 }
+metadata_store_stub.users_exist = lambda: False
+metadata_store_stub.get_user_for_token = lambda token: None
+metadata_store_stub.can_user_access_document = lambda user, document, write=False: True
+metadata_store_stub.list_documents_for_user = lambda user: []
+metadata_store_stub.allowed_file_hashes_for_user = lambda user: []
+metadata_store_stub.record_audit_event = lambda **kwargs: {}
+metadata_store_stub.list_audit_events = lambda limit=50: []
+metadata_store_stub.create_chat_session = lambda session_id, title, user_id="": {
+    "id": session_id,
+    "title": title,
+    "created_at": 123,
+    "updated_at": 123,
+    "user_id": user_id,
+}
+metadata_store_stub.get_chat_session = lambda session_id: None
+metadata_store_stub.list_chat_sessions = lambda **kwargs: []
+metadata_store_stub.add_chat_message = lambda **kwargs: {
+    "id": kwargs.get("message_id"),
+    "session_id": kwargs.get("session_id"),
+    "role": kwargs.get("role"),
+    "content": kwargs.get("content"),
+    "created_at": 123,
+}
+metadata_store_stub.list_chat_messages = lambda session_id: []
 sys.modules.setdefault("app.services.metadata_store", metadata_store_stub)
 
 from app.api import query as query_module
@@ -74,14 +98,18 @@ class ApiIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         self.original_api_key = settings.app_api_key
+        self.original_enable_user_auth = settings.enable_user_auth
         self.original_run_rag_pipeline = query_module.run_rag_pipeline
         self.original_get_indexed_document = upload_module.get_indexed_document
         self.original_delete_indexed_document = upload_module.delete_indexed_document
         self.original_delete_stored_upload = upload_module._delete_stored_upload
         self.original_list_document_chunks = upload_module.list_document_chunks
 
+        settings.enable_user_auth = False
+
     def tearDown(self):
         settings.app_api_key = self.original_api_key
+        settings.enable_user_auth = self.original_enable_user_auth
         query_module.run_rag_pipeline = self.original_run_rag_pipeline
         upload_module.get_indexed_document = self.original_get_indexed_document
         upload_module.delete_indexed_document = self.original_delete_indexed_document
@@ -201,7 +229,7 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_query_empty_knowledge_base_returns_400(self):
         settings.app_api_key = ""
 
-        def fake_run_rag_pipeline(question, stream_callback=None):
+        def fake_run_rag_pipeline(question, stream_callback=None, **kwargs):
             raise RuntimeError("The knowledge base is empty. Please upload at least one PDF document first.")
 
         query_module.run_rag_pipeline = fake_run_rag_pipeline
@@ -212,7 +240,7 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_streaming_query_emits_error_event(self):
         settings.app_api_key = ""
 
-        def fake_run_rag_pipeline(question, stream_callback=None):
+        def fake_run_rag_pipeline(question, stream_callback=None, **kwargs):
             raise RuntimeError("boom")
 
         query_module.run_rag_pipeline = fake_run_rag_pipeline

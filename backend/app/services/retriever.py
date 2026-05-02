@@ -276,8 +276,14 @@ def _retrieve_bm25_candidates(
     store,
     question: str,
     top_k: int,
+    allowed_file_hashes: set[str] | None = None,
 ) -> tuple[list[RetrievedChunk], int]:
     docs = _get_store_documents(store)
+    if allowed_file_hashes is not None:
+        docs = [
+            doc for doc in docs
+            if str(doc.metadata.get("file_hash", "")) in allowed_file_hashes
+        ]
     if not docs:
         return [], 0
 
@@ -356,6 +362,7 @@ def _retrieve_candidates(
     question: str,
     query_variants: list[str],
     k: int,
+    allowed_file_hashes: set[str] | None = None,
 ) -> tuple[list[RetrievedChunk], int]:
     scored: dict[tuple[str, int, str], RetrievedChunk] = {}
     candidates_considered = 0
@@ -365,6 +372,8 @@ def _retrieve_candidates(
             results: list[Tuple[Document, float]] = store.similarity_search_with_score(variant, k=k)
             candidates_considered += len(results)
             for doc, distance in results:
+                if allowed_file_hashes is not None and str(doc.metadata.get("file_hash", "")) not in allowed_file_hashes:
+                    continue
                 vector_conf = _distance_to_confidence(distance)
                 lexical = _lexical_overlap_score(question, doc.page_content)
 
@@ -387,6 +396,8 @@ def _retrieve_candidates(
             docs = store.similarity_search(variant, k=k)
             candidates_considered += len(docs)
             for doc in docs:
+                if allowed_file_hashes is not None and str(doc.metadata.get("file_hash", "")) not in allowed_file_hashes:
+                    continue
                 lexical = _lexical_overlap_score(question, doc.page_content)
                 source = str(doc.metadata.get("source", "unknown"))
                 page = int(doc.metadata.get("page", 0) or 0)
@@ -409,6 +420,7 @@ def _retrieve_candidates(
 
 def retrieve_relevant_chunks_with_diagnostics(
     question: str,
+    allowed_file_hashes: list[str] | None = None,
 ) -> tuple[list[RetrievedChunk], RetrievalDebugInfo]:
     """Retrieve, rerank, and optionally perform one deterministic fallback pass."""
     question = normalize_query(question)
@@ -433,8 +445,13 @@ def retrieve_relevant_chunks_with_diagnostics(
         if fast_mode_applied
         else max(final_top_n, int(settings.retrieval_initial_top_k))
     )
+    access_filter = {str(item) for item in allowed_file_hashes} if allowed_file_hashes is not None else None
     initial_top_k = configured_initial_top_k
     candidate_k = max(initial_top_k, int(settings.retrieval_candidate_k))
+    if access_filter is not None:
+        if not access_filter:
+            raise RuntimeError("No documents are available to your account.")
+        candidate_k = max(candidate_k, configured_initial_top_k * 4, len(access_filter) * final_top_n)
     is_broad = _is_broad_question(question)
     query_variants = _build_query_variants(question)
 
@@ -457,12 +474,14 @@ def retrieve_relevant_chunks_with_diagnostics(
             question,
             query_variants,
             candidate_k,
+            access_filter,
         )
         bm25_future = executor.submit(
             _retrieve_bm25_candidates,
             store,
             question,
             bm25_k,
+            access_filter,
         )
 
         ranked_vector, considered_vector = vector_future.result()
@@ -504,6 +523,7 @@ def retrieve_relevant_chunks_with_diagnostics(
             question=question,
             query_variants=fallback_variants,
             k=candidate_k,
+            allowed_file_hashes=access_filter,
         )
         considered += fallback_considered
 
@@ -610,7 +630,7 @@ def retrieve_relevant_chunks_with_diagnostics(
     )
 
 
-def retrieve_relevant_chunks(question: str) -> List[Document]:
+def retrieve_relevant_chunks(question: str, allowed_file_hashes: list[str] | None = None) -> List[Document]:
     """
     Perform a similarity search and return the top-k matching chunks.
 
@@ -625,5 +645,5 @@ def retrieve_relevant_chunks(question: str) -> List[Document]:
         RuntimeError: If the vector store has not been initialised yet
                       (i.e., no documents have been uploaded).
     """
-    chunks, _ = retrieve_relevant_chunks_with_diagnostics(question)
+    chunks, _ = retrieve_relevant_chunks_with_diagnostics(question, allowed_file_hashes=allowed_file_hashes)
     return [item.document for item in chunks]

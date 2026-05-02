@@ -21,6 +21,7 @@ import './App.css';
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const API_KEY = import.meta.env.VITE_API_KEY || '';
 const API_HEADERS: Record<string, string> = API_KEY ? { 'X-API-Key': API_KEY } : {};
+const AUTH_TOKEN_STORAGE_KEY = 'ragit_auth_token';
 const RESET_REQUEST_TIMEOUT_MS = 15000;
 const STARTER_PROMPTS = [
   'Summarize leave policy changes this year',
@@ -122,6 +123,8 @@ interface AdminOverview {
   feedback_count: number;
   chat_session_count: number;
   eval_run_count: number;
+  user_count: number;
+  audit_event_count: number;
   recent_feedback: Array<{
     id: number;
     created_at: number;
@@ -136,6 +139,39 @@ interface AdminOverview {
   docling_enabled: boolean;
   reranker_enabled: boolean;
   openai_enabled: boolean;
+}
+
+interface AuthStatus {
+  auth_enabled: boolean;
+  has_users: boolean;
+  bootstrap_required: boolean;
+}
+
+interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+  role: 'admin' | 'user' | string;
+  disabled: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface AuthTokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_at: number;
+  user: AuthUser;
+}
+
+interface AuditEvent {
+  id: number;
+  created_at: number;
+  actor_email: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  detail: Record<string, unknown>;
 }
 
 interface ChatSession {
@@ -180,6 +216,9 @@ interface KnowledgeBaseFileApiItem {
   upload_status?: string;
   vision_calls_used?: number;
   embedding_model?: string;
+  owner_user_id?: string;
+  visibility?: string;
+  allowed_roles?: string[];
 }
 
 interface KnowledgeFile {
@@ -192,6 +231,9 @@ interface KnowledgeFile {
   uploadStatus: string;
   visionCallsUsed: number;
   embeddingModel: string;
+  ownerUserId: string;
+  visibility: string;
+  allowedRoles: string[];
 }
 
 interface Message {
@@ -220,13 +262,27 @@ type StreamEventPayload = StreamDonePayload & {
 function getApiErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
     if (error.response?.status === 401) {
-      return 'API key missing or invalid. Check VITE_API_KEY and backend APP_API_KEY.';
+      return 'Login expired or API key missing. Sign in again.';
+    }
+    if (error.response?.status === 403) {
+      return 'Your account does not have permission for that action.';
     }
     if (error.response?.data?.detail) {
       return String(error.response.data.detail);
     }
   }
   return fallback;
+}
+
+function getStoredAuthToken(): string {
+  return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+}
+
+function buildApiHeaders(token: string): Record<string, string> {
+  return {
+    ...API_HEADERS,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
 }
 
 function mergeKnowledgeFiles(current: KnowledgeFile[], incoming: KnowledgeFile[]): KnowledgeFile[] {
@@ -262,6 +318,9 @@ function mapKnowledgeFile(item: KnowledgeBaseFileApiItem): KnowledgeFile {
     uploadStatus: item.upload_status || 'indexed',
     visionCallsUsed: Number(item.vision_calls_used || 0),
     embeddingModel: item.embedding_model || '',
+    ownerUserId: item.owner_user_id || '',
+    visibility: item.visibility || 'shared',
+    allowedRoles: item.allowed_roles || [],
   };
 }
 
@@ -277,6 +336,9 @@ function mapUploadResult(item: UploadItemResult): KnowledgeFile | null {
     uploadStatus: item.status === 'duplicate' ? 'duplicate' : 'indexed',
     visionCallsUsed: Number(item.vision_calls_used || 0),
     embeddingModel: '',
+    ownerUserId: '',
+    visibility: 'shared',
+    allowedRoles: [],
   };
 }
 
@@ -315,6 +377,15 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [evalRuns, setEvalRuns] = useState<EvalRun[]>([]);
   const [isRunningEval, setIsRunningEval] = useState(false);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authToken, setAuthToken] = useState(getStoredAuthToken);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authDisplayName, setAuthDisplayName] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryInputRef = useRef<HTMLInputElement>(null);
@@ -322,6 +393,8 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const apiHeaders = React.useMemo(() => buildApiHeaders(authToken), [authToken]);
+  const canUseApi = Boolean(authStatus && (!authStatus.auth_enabled || authUser || API_KEY));
 
   // Auto-scroll only when user is already near bottom.
   useEffect(() => {
@@ -368,11 +441,82 @@ function App() {
     shouldAutoScrollRef.current = false;
   };
 
+  useEffect(() => {
+    const loadAuthStatus = async () => {
+      try {
+        const response = await axios.get<AuthStatus>(`${API_BASE}/auth/status`);
+        setAuthStatus(response.data);
+      } catch (error) {
+        console.warn('Failed to load auth status.', error);
+        setAuthStatus({ auth_enabled: false, has_users: false, bootstrap_required: false });
+      }
+    };
+    void loadAuthStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!authStatus || (!authToken && !API_KEY)) return;
+    const loadCurrentUser = async () => {
+      try {
+        const response = await axios.get<{ user: AuthUser }>(`${API_BASE}/auth/me`, {
+          headers: apiHeaders,
+        });
+        setAuthUser(response.data.user);
+      } catch (error) {
+        console.warn('Failed to restore login.', error);
+        window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+        setAuthToken('');
+        setAuthUser(null);
+      }
+    };
+    void loadCurrentUser();
+  }, [apiHeaders, authStatus, authToken]);
+
+  const handleAuthSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!authEmail.trim() || !authPassword.trim()) return;
+
+    setIsAuthenticating(true);
+    setAuthError(null);
+    try {
+      const endpoint = authStatus?.bootstrap_required ? '/auth/bootstrap' : '/auth/login';
+      const payload = authStatus?.bootstrap_required
+        ? { email: authEmail, password: authPassword, display_name: authDisplayName }
+        : { email: authEmail, password: authPassword };
+      const response = await axios.post<AuthTokenResponse>(`${API_BASE}${endpoint}`, payload);
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, response.data.access_token);
+      setAuthToken(response.data.access_token);
+      setAuthUser(response.data.user);
+      setAuthPassword('');
+      setAuthStatus((prev) => prev ? { ...prev, has_users: true, bootstrap_required: false } : prev);
+    } catch (error) {
+      setAuthError(getApiErrorMessage(error, 'Sign-in failed.'));
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await axios.post(`${API_BASE}/auth/logout`, undefined, { headers: apiHeaders });
+    } catch (error) {
+      console.warn('Logout request failed.', error);
+    }
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    setAuthToken('');
+    setAuthUser(null);
+    setMessages([]);
+    setKnowledgeFiles([]);
+    setChatSessions([]);
+    setActiveSessionId(null);
+  };
+
   const loadIndexedFiles = useCallback(async () => {
+    if (!canUseApi) return;
     try {
       const response = await axios.get<KnowledgeBaseFilesResponse>(
         `${API_BASE}/knowledge-base/files`,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       const files = (response.data?.files || []).map(mapKnowledgeFile);
       setKnowledgeFiles(files);
@@ -380,34 +524,37 @@ function App() {
       // Keep UI usable even if this optional hydration call fails.
       console.warn('Failed to load indexed files on startup.', error);
     }
-  }, []);
+  }, [apiHeaders, canUseApi]);
 
   useEffect(() => {
+    if (!canUseApi) return;
     void loadIndexedFiles();
-  }, [loadIndexedFiles]);
+  }, [canUseApi, loadIndexedFiles]);
 
   const loadChatSessions = useCallback(async () => {
+    if (!canUseApi) return;
     try {
       const response = await axios.get<{ sessions: ChatSession[] }>(
         `${API_BASE}/chat/sessions`,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       setChatSessions(response.data?.sessions || []);
     } catch (error) {
       console.warn('Failed to load chat sessions.', error);
     }
-  }, []);
+  }, [apiHeaders, canUseApi]);
 
   useEffect(() => {
+    if (!canUseApi) return;
     void loadChatSessions();
-  }, [loadChatSessions]);
+  }, [canUseApi, loadChatSessions]);
 
   const ensureChatSession = async (): Promise<string> => {
     if (activeSessionId) return activeSessionId;
     const response = await axios.post<ChatSession>(
       `${API_BASE}/chat/sessions`,
       { title: 'New chat' },
-      { headers: API_HEADERS }
+      { headers: apiHeaders }
     );
     setActiveSessionId(response.data.id);
     setChatSessions((prev) => [response.data, ...prev]);
@@ -427,7 +574,7 @@ function App() {
           confidence_score: message.confidence_score,
           confidence_level: message.confidence_level,
         },
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       void loadChatSessions();
     } catch (error) {
@@ -439,7 +586,7 @@ function App() {
     try {
       const response = await axios.get<{ messages: ChatMessageApiItem[] }>(
         `${API_BASE}/chat/sessions/${encodeURIComponent(session.id)}/messages`,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       const loaded = (response.data?.messages || []).map((item) => ({
         id: item.id,
@@ -462,7 +609,7 @@ function App() {
     const response = await axios.post<ChatSession>(
       `${API_BASE}/chat/sessions`,
       { title: 'New chat' },
-      { headers: API_HEADERS }
+      { headers: apiHeaders }
     );
     setActiveSessionId(response.data.id);
     setChatSessions((prev) => [response.data, ...prev]);
@@ -473,30 +620,33 @@ function App() {
     try {
       const response = await axios.get<{ runs: EvalRun[] }>(
         `${API_BASE}/evals/runs`,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       setEvalRuns(response.data?.runs || []);
     } catch (error) {
       console.warn('Failed to load eval runs.', error);
     }
-  }, []);
+  }, [apiHeaders]);
 
   const loadAdminDebug = useCallback(async () => {
+    if (!canUseApi) return;
     setIsLoadingAdmin(true);
     try {
-      const [overviewResponse, healthResponse] = await Promise.all([
-        axios.get<AdminOverview>(`${API_BASE}/admin/overview`, { headers: API_HEADERS }),
-        axios.get<{ checks: ModelHealthItem[] }>(`${API_BASE}/health/models`, { headers: API_HEADERS }),
+      const [overviewResponse, healthResponse, auditResponse] = await Promise.all([
+        axios.get<AdminOverview>(`${API_BASE}/admin/overview`, { headers: apiHeaders }),
+        axios.get<{ checks: ModelHealthItem[] }>(`${API_BASE}/health/models`, { headers: apiHeaders }),
+        axios.get<{ events: AuditEvent[] }>(`${API_BASE}/admin/audit-log`, { headers: apiHeaders }),
       ]);
       setAdminOverview(overviewResponse.data);
       setModelHealth(healthResponse.data?.checks || []);
+      setAuditEvents(auditResponse.data?.events || []);
       await loadEvalRuns();
     } catch (error) {
       console.warn('Failed to load admin/debug data.', error);
     } finally {
       setIsLoadingAdmin(false);
     }
-  }, [loadEvalRuns]);
+  }, [apiHeaders, canUseApi, loadEvalRuns]);
 
   const startEvalRun = async () => {
     setIsRunningEval(true);
@@ -504,13 +654,13 @@ function App() {
       const response = await axios.post<{ run_id: string }>(
         `${API_BASE}/evals/runs`,
         undefined,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       const runId = response.data.run_id;
       for (let i = 0; i < 120; i += 1) {
         const runResponse = await axios.get<EvalRun>(
           `${API_BASE}/evals/runs/${encodeURIComponent(runId)}`,
-          { headers: API_HEADERS }
+          { headers: apiHeaders }
         );
         setEvalRuns((prev) => [runResponse.data, ...prev.filter((run) => run.id !== runId)]);
         if (runResponse.data.status !== 'running') break;
@@ -543,7 +693,7 @@ function App() {
     try {
       const response = await axios.post<{ job_id: string }>(`${API_BASE}/upload/jobs`, formData, {
         headers: {
-          ...API_HEADERS,
+          ...apiHeaders,
           'Content-Type': 'multipart/form-data',
         },
         onUploadProgress: (event) => {
@@ -566,7 +716,7 @@ function App() {
       for (let i = 0; i < 720; i += 1) {
         const jobResponse = await axios.get<IngestionJobStatus>(
           `${API_BASE}/upload/jobs/${encodeURIComponent(jobId)}`,
-          { headers: API_HEADERS }
+          { headers: apiHeaders }
         );
         const job = jobResponse.data;
         setUploadStatus(job.message || `${job.stage}: ${job.status}`);
@@ -677,12 +827,12 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/query/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...API_HEADERS },
+        headers: { 'Content-Type': 'application/json', ...apiHeaders },
         body: JSON.stringify({ question: userMsg.content }),
       });
 
       if (response.status === 401) {
-        throw new Error('API key missing or invalid. Check VITE_API_KEY and backend APP_API_KEY.');
+        throw new Error('Login expired or API key missing. Sign in again.');
       }
 
       if (!response.ok || !response.body) {
@@ -787,7 +937,7 @@ function App() {
       const response = await axios.post(
         `${API_BASE}/knowledge-base/reset`,
         undefined,
-        { timeout: RESET_REQUEST_TIMEOUT_MS, headers: API_HEADERS }
+        { timeout: RESET_REQUEST_TIMEOUT_MS, headers: apiHeaders }
       );
       const deleted = Number(response.data?.uploads_deleted ?? 0);
       setMessages([]);
@@ -818,7 +968,7 @@ function App() {
     try {
       const response = await axios.delete(
         `${API_BASE}/knowledge-base/files/${encodeURIComponent(file.fileHash)}`,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       const chunksDeleted = Number(response.data?.chunks_deleted ?? 0);
       setKnowledgeFiles((prev) => prev.filter((item) => item.fileHash !== file.fileHash));
@@ -842,7 +992,7 @@ function App() {
       const response = await axios.post<UploadItemResult>(
         `${API_BASE}/knowledge-base/files/${encodeURIComponent(file.fileHash)}/reindex`,
         undefined,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       const updated = mapUploadResult(response.data);
       if (updated) {
@@ -861,6 +1011,29 @@ function App() {
     }
   };
 
+  const handleUpdateDocumentVisibility = async (file: KnowledgeFile, visibility: string) => {
+    if (!file.fileHash || documentActionId || visibility === file.visibility) return;
+
+    const actionId = `permissions:${file.fileHash}`;
+    setDocumentActionId(actionId);
+    setUploadStatus(`Updating access for ${file.filename}...`);
+    try {
+      const response = await axios.patch<KnowledgeBaseFilesResponse>(
+        `${API_BASE}/knowledge-base/files/${encodeURIComponent(file.fileHash)}/permissions`,
+        { visibility, allowed_roles: file.allowedRoles || [] },
+        { headers: apiHeaders }
+      );
+      const files = (response.data?.files || []).map(mapKnowledgeFile);
+      setKnowledgeFiles(files);
+      setUploadStatus(`Updated ${file.filename} access to ${visibility}.`);
+    } catch (error) {
+      console.error('Permission update error:', error);
+      setUploadStatus(getApiErrorMessage(error, `Failed to update ${file.filename} access.`));
+    } finally {
+      setDocumentActionId(null);
+    }
+  };
+
   const openDocumentChunks = async (
     fileHash: string | null | undefined,
     focusChunkIndex?: number | null,
@@ -873,7 +1046,7 @@ function App() {
         : '';
       const response = await axios.get<DocumentChunksResponse>(
         `${API_BASE}/knowledge-base/files/${encodeURIComponent(fileHash)}/chunks${query}`,
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       setSelectedChunks(response.data);
     } catch (error) {
@@ -914,7 +1087,7 @@ function App() {
           sources: assistantMessage.sources || [],
           diagnostics: assistantMessage.diagnostics || undefined,
         },
-        { headers: API_HEADERS }
+        { headers: apiHeaders }
       );
       setFeedbackStatus('Feedback saved.');
       void loadAdminDebug();
@@ -931,12 +1104,75 @@ function App() {
   const contextCards = latestAssistant?.sources?.slice(0, 4) || [];
   const latestDiagnostics = latestAssistant?.diagnostics || null;
 
+  if (!authStatus) {
+    return (
+      <div className="auth-shell">
+        <div className="auth-card">
+          <h1>RAGiT</h1>
+          <p>Checking access...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (authStatus?.auth_enabled && !authUser && !API_KEY) {
+    return (
+      <div className="auth-shell">
+        <form className="auth-card" onSubmit={handleAuthSubmit}>
+          <h1>RAGiT</h1>
+          <p>{authStatus.bootstrap_required ? 'Create the first admin account.' : 'Sign in to your workspace.'}</p>
+          <label>
+            Email
+            <input
+              type="email"
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              autoComplete="email"
+            />
+          </label>
+          {authStatus.bootstrap_required && (
+            <label>
+              Display name
+              <input
+                type="text"
+                value={authDisplayName}
+                onChange={(event) => setAuthDisplayName(event.target.value)}
+                autoComplete="name"
+              />
+            </label>
+          )}
+          <label>
+            Password
+            <input
+              type="password"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              autoComplete={authStatus.bootstrap_required ? 'new-password' : 'current-password'}
+            />
+          </label>
+          {authError && <p className="auth-error">{authError}</p>}
+          <button type="submit" disabled={isAuthenticating || !authEmail || !authPassword}>
+            {isAuthenticating ? <Loader2 size={15} className="animate-spin" /> : null}
+            {authStatus.bootstrap_required ? 'Create admin' : 'Sign in'}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="ui-shell">
       <aside className="kb-pane">
         <div className="brand-block">
           <h1>RAGiT</h1>
           <p>Grounded knowledge workspace</p>
+          {authUser && (
+            <div className="user-chip">
+              <span>{authUser.display_name || authUser.email}</span>
+              <small>{authUser.role}</small>
+              {!API_KEY && <button type="button" onClick={() => void handleLogout()}>Logout</button>}
+            </div>
+          )}
         </div>
 
         <div className="sessions-panel">
@@ -1025,6 +1261,7 @@ function App() {
                 <div className="kb-meta">
                   <span>{file.parsingMethod}</span>
                   <span>{file.uploadStatus}</span>
+                  <span>{file.visibility}</span>
                   {file.visionCallsUsed > 0 && <span>{file.visionCallsUsed} vision calls</span>}
                 </div>
                 <p className="kb-indexed-at">{formatIndexedAt(file.indexedAt)}</p>
@@ -1049,6 +1286,15 @@ function App() {
                     )}
                     Reindex
                   </button>
+                  <select
+                    value={file.visibility}
+                    onChange={(event) => void handleUpdateDocumentVisibility(file, event.target.value)}
+                    disabled={Boolean(documentActionId) || isUploading || isResetting}
+                    aria-label={`Access for ${file.filename}`}
+                  >
+                    <option value="shared">Shared</option>
+                    <option value="private">Private</option>
+                  </select>
                   <button
                     type="button"
                     className="danger"
@@ -1083,6 +1329,8 @@ function App() {
               <span>{adminOverview.feedback_count} feedback</span>
               <span>{adminOverview.chat_session_count} chats</span>
               <span>{adminOverview.eval_run_count} evals</span>
+              <span>{adminOverview.user_count} users</span>
+              <span>{adminOverview.audit_event_count} audit events</span>
               <span>Docling {adminOverview.docling_enabled ? 'on' : 'off'}</span>
               <span>Reranker {adminOverview.reranker_enabled ? 'on' : 'off'}</span>
             </div>
@@ -1095,6 +1343,16 @@ function App() {
                 <div key={item.name} className={`health-item ${item.status}`}>
                   <strong>{item.name}</strong>
                   <span>{item.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {auditEvents.length > 0 && (
+            <div className="audit-list">
+              {auditEvents.slice(0, 5).map((event) => (
+                <div key={event.id} className="audit-item">
+                  <strong>{event.action}</strong>
+                  <span>{event.actor_email || 'system'} · {new Date(event.created_at * 1000).toLocaleString()}</span>
                 </div>
               ))}
             </div>

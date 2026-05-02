@@ -17,7 +17,8 @@ Retrieval-Augmented Generation assistant for local knowledge bases. It lets you 
 - Runtime model health checks for embeddings, Docling, reranker, Ollama, and OpenAI config.
 - RAG eval fixture, background eval runs, dashboard, and CI workflow for regression checks.
 - Local sample document generator for repeatable demos.
-- Optional API-key protection for backend routes.
+- Local user authentication, admin/user roles, document-level visibility, and audit logs.
+- Optional API-key protection for scripts and system-admin access.
 
 ## Architecture
 
@@ -90,11 +91,24 @@ To export the FastAPI OpenAPI schema:
 .\scripts\export_openapi.ps1
 ```
 
+## Authentication Setup
+
+User auth is enabled by default. On first launch, open the frontend and create the first admin account. After that, users sign in with email/password and the frontend sends a bearer token to the backend.
+
+Relevant settings:
+
+```env
+ENABLE_USER_AUTH=true
+AUTH_TOKEN_TTL_HOURS=24
+```
+
+Documents can be marked `shared` or `private` from the sidebar. Admin users can manage all documents; regular users can manage their own documents and only retrieve documents their account can access.
+
 ## API Key Setup
 
-For local development, `APP_API_KEY` can be left empty.
+For local browser use, `APP_API_KEY` can be left empty because login tokens protect the app.
 
-For production-like usage:
+For scripts, CI, or production-like system-admin access:
 
 ```env
 APP_ENV=production
@@ -116,6 +130,8 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 |---|---|
 | `APP_ENV` | `development` or `production`. Production requires `APP_API_KEY`. |
 | `APP_API_KEY` | Optional local API key; required in production. |
+| `ENABLE_USER_AUTH` | Enables local email/password login and bearer-token auth. |
+| `AUTH_TOKEN_TTL_HOURS` | Login token lifetime in hours. |
 | `ALLOWED_CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS. |
 | `MAX_UPLOAD_SIZE_MB` | Maximum PDF upload size handled by the app. |
 | `METADATA_DB_PATH` | SQLite store for document registry, feedback, and admin summaries. |
@@ -133,11 +149,19 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 ## API Endpoints
 
 - `GET /health` - public health check.
+- `GET /auth/status` - inspect whether first-admin bootstrap is required.
+- `POST /auth/bootstrap` - create the first admin account.
+- `POST /auth/login` - exchange email/password for a bearer token.
+- `POST /auth/logout` - revoke the current bearer token.
+- `GET /auth/me` - return the current user.
+- `GET /auth/users` - list users as an admin.
+- `POST /auth/users` - create a user as an admin.
 - `POST /upload` - ingest one or more PDF documents.
 - `POST /upload/jobs` - upload PDFs and ingest them in the background.
 - `GET /upload/jobs/{job_id}` - poll ingestion job progress.
 - `GET /knowledge-base/files` - list indexed document metadata.
 - `GET /knowledge-base/files/{file_hash}/chunks` - inspect stored chunks for a document.
+- `PATCH /knowledge-base/files/{file_hash}/permissions` - update document visibility.
 - `DELETE /knowledge-base/files/{file_hash}` - remove one document from uploads, registry, and FAISS.
 - `POST /knowledge-base/files/{file_hash}/reindex` - rebuild chunks/vectors for one stored PDF.
 - `POST /knowledge-base/reset` - clear uploads and FAISS artifacts.
@@ -151,9 +175,10 @@ When `APP_ENV=production`, the backend fails startup if `APP_API_KEY` is empty.
 - `POST /evals/runs` - start a background eval run.
 - `GET /evals/runs` - list eval runs for the dashboard.
 - `GET /admin/overview` - local admin/debug summary.
+- `GET /admin/audit-log` - list recent audit events.
 - `GET /health/models` - runtime model/dependency health check.
 
-Protected endpoints require `X-API-Key` or `Authorization: Bearer <key>` when `APP_API_KEY` is configured.
+Protected endpoints require either a login bearer token or `X-API-Key`. The API key path acts as a system-admin path for automation.
 
 ## Verification
 
@@ -185,7 +210,7 @@ RAG eval against a running backend:
 python .\evals\run_eval.py --live --api-url http://localhost:8000
 ```
 
-If `APP_API_KEY` is configured:
+If user auth is enabled, configure `APP_API_KEY` for eval automation and pass it to the script:
 
 ```powershell
 python .\evals\run_eval.py --live --api-url http://localhost:8000 --api-key replace-with-a-long-random-secret

@@ -608,6 +608,8 @@ def _append_verification_warning(answer: str) -> str:
 def run_rag_pipeline(
     question: str,
     stream_callback: Callable[[str], None] | None = None,
+    allowed_file_hashes: list[str] | None = None,
+    access_scope: str = "all",
 ) -> PipelineResult:
     """
     Execute the complete Retrieval-Augmented Generation pipeline.
@@ -640,7 +642,8 @@ def run_rag_pipeline(
     )
 
     kb_version = get_knowledge_base_version()
-    query_only_cache_key = build_cache_key(question=normalized_question, kb_version=kb_version)
+    scoped_question = f"{access_scope}:{normalized_question}"
+    query_only_cache_key = build_cache_key(question=scoped_question, kb_version=kb_version)
 
     if settings.enable_query_cache:
         cached_payload = get_cached_result(query_only_cache_key)
@@ -649,7 +652,10 @@ def run_rag_pipeline(
             return _payload_to_result(deepcopy(cached_payload))
 
     # ── Step 1: Retrieve ─────────────────────────────────────────────────────
-    chunks, debug = retrieve_relevant_chunks_with_diagnostics(normalized_question)
+    chunks, debug = retrieve_relevant_chunks_with_diagnostics(
+        normalized_question,
+        allowed_file_hashes=allowed_file_hashes,
+    )
     retrieval_ms = float(debug.retrieval_ms)
 
     if not chunks:
@@ -695,7 +701,7 @@ def run_rag_pipeline(
     top_k_ids = [_chunk_identity(item) for item in chunks_for_generation]
     prompt_fingerprint = build_prompt_fingerprint(filled_prompt)
     cache_key = build_cache_key(
-        question=normalized_question,
+        question=scoped_question,
         kb_version=kb_version,
         top_k_ids=top_k_ids,
         prompt_fingerprint=prompt_fingerprint,

@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     # set it in production to require X-API-Key or Authorization: Bearer <key>.
     app_api_key: str = ""
     allowed_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    enable_user_auth: bool = True
+    auth_token_ttl_hours: int = 24
 
     # Model identifiers
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"

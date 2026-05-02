@@ -233,6 +233,9 @@ def register_indexed_document(
     upload_path: str = "",
     upload_status: str = "indexed",
     vision_calls_used: int = 0,
+    owner_user_id: str = "",
+    visibility: str = "shared",
+    allowed_roles: list[str] | None = None,
 ) -> None:
     """Persist hash and document metadata for duplicate prevention."""
     metadata_store.upsert_document(
@@ -246,6 +249,9 @@ def register_indexed_document(
         upload_path=upload_path,
         upload_status=upload_status,
         vision_calls_used=vision_calls_used,
+        owner_user_id=owner_user_id,
+        visibility=visibility,
+        allowed_roles=allowed_roles,
     )
 
 

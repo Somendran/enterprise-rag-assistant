@@ -89,6 +89,9 @@ class KnowledgeBaseFileItem(BaseModel):
     upload_status: str = Field(default="indexed", description="Current document status.")
     vision_calls_used: int = Field(default=0, description="Vision enrichment calls used during ingestion.")
     embedding_model: str = Field(default="", description="Embedding model used for this document.")
+    owner_user_id: str = Field(default="", description="User id that uploaded or owns this document.")
+    visibility: str = Field(default="shared", description="shared, private, or role.")
+    allowed_roles: List[str] = Field(default_factory=list, description="Roles that can access role-restricted docs.")
 
 
 class KnowledgeBaseFilesResponse(BaseModel):
@@ -125,6 +128,11 @@ class DocumentChunksResponse(BaseModel):
     filename: str = Field(default="", description="Document filename.")
     chunks: List[DocumentChunkItem] = Field(default_factory=list)
     focus_chunk_index: Optional[int] = None
+
+
+class DocumentPermissionsUpdateRequest(BaseModel):
+    visibility: str = Field(default="shared", description="shared, private, or role.")
+    allowed_roles: List[str] = Field(default_factory=list)
 
 
 # ── /query ───────────────────────────────────────────────────────────────────
@@ -264,6 +272,8 @@ class AdminOverviewResponse(BaseModel):
     feedback_count: int
     chat_session_count: int = 0
     eval_run_count: int = 0
+    user_count: int = 0
+    audit_event_count: int = 0
     recent_feedback: List[dict[str, Any]] = Field(default_factory=list)
     metadata_db_path: str
     embedding_model: str
@@ -339,3 +349,67 @@ class EvalRunItem(BaseModel):
 
 class EvalRunsResponse(BaseModel):
     runs: List[EvalRunItem] = Field(default_factory=list)
+
+
+class AuthStatusResponse(BaseModel):
+    auth_enabled: bool
+    has_users: bool
+    bootstrap_required: bool
+
+
+class AuthBootstrapRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=8, max_length=200)
+    display_name: str = Field(default="", max_length=120)
+
+
+class AuthLoginRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class UserItem(BaseModel):
+    id: str
+    email: str
+    display_name: str = ""
+    role: str
+    disabled: int = 0
+    created_at: int
+    updated_at: int
+
+
+class AuthTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: int
+    user: UserItem
+
+
+class CurrentUserResponse(BaseModel):
+    user: UserItem
+
+
+class UserCreateRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=254)
+    password: str = Field(..., min_length=8, max_length=200)
+    display_name: str = Field(default="", max_length=120)
+    role: str = Field(default="user", description="admin or user")
+
+
+class UsersResponse(BaseModel):
+    users: List[UserItem] = Field(default_factory=list)
+
+
+class AuditEventItem(BaseModel):
+    id: int
+    created_at: int
+    actor_user_id: str = ""
+    actor_email: str = ""
+    action: str
+    resource_type: str = ""
+    resource_id: str = ""
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventsResponse(BaseModel):
+    events: List[AuditEventItem] = Field(default_factory=list)

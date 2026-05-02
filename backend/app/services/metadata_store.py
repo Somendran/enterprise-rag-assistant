@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+import secrets
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -46,10 +49,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             parsing_method TEXT NOT NULL DEFAULT 'unknown',
             upload_path TEXT NOT NULL DEFAULT '',
             upload_status TEXT NOT NULL DEFAULT 'indexed',
-            vision_calls_used INTEGER NOT NULL DEFAULT 0
+            vision_calls_used INTEGER NOT NULL DEFAULT 0,
+            owner_user_id TEXT NOT NULL DEFAULT '',
+            visibility TEXT NOT NULL DEFAULT 'shared',
+            allowed_roles_json TEXT NOT NULL DEFAULT '[]'
         )
         """
     )
+    _ensure_column(conn, "documents", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "documents", "visibility", "TEXT NOT NULL DEFAULT 'shared'")
+    _ensure_column(conn, "documents", "allowed_roles_json", "TEXT NOT NULL DEFAULT '[]'")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS feedback (
@@ -62,10 +71,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             comment TEXT NOT NULL DEFAULT '',
             confidence_score REAL,
             sources_json TEXT NOT NULL DEFAULT '[]',
-            diagnostics_json TEXT NOT NULL DEFAULT '{}'
+            diagnostics_json TEXT NOT NULL DEFAULT '{}',
+            user_id TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    _ensure_column(conn, "feedback", "user_id", "TEXT NOT NULL DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback(created_at DESC)")
     conn.execute(
         """
@@ -79,20 +90,24 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             total_files INTEGER NOT NULL DEFAULT 0,
             processed_files INTEGER NOT NULL DEFAULT 0,
             total_chunks_indexed INTEGER NOT NULL DEFAULT 0,
-            results_json TEXT NOT NULL DEFAULT '[]'
+            results_json TEXT NOT NULL DEFAULT '[]',
+            created_by_user_id TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    _ensure_column(conn, "ingestion_jobs", "created_by_user_id", "TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            user_id TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    _ensure_column(conn, "chat_sessions", "user_id", "TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -124,6 +139,90 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'user',
+            password_hash TEXT NOT NULL,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(lower(email))")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_tokens (
+            token_hash TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            revoked_at INTEGER,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            actor_user_id TEXT NOT NULL DEFAULT '',
+            actor_email TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            resource_type TEXT NOT NULL DEFAULT '',
+            resource_id TEXT NOT NULL DEFAULT '',
+            detail_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at DESC)")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {str(row["name"]) for row in rows}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _json_list(value: str | None) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item).strip()]
+
+
+def _decode_document_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    item["allowed_roles"] = _json_list(str(item.pop("allowed_roles_json", "[]")))
+    return item
+
+
+def can_user_access_document(user: dict[str, Any], document: dict[str, Any], *, write: bool = False) -> bool:
+    if not user:
+        return False
+    if user.get("role") == "admin" or user.get("is_system_admin"):
+        return True
+    if write:
+        return str(document.get("owner_user_id", "")) == str(user.get("id", ""))
+    visibility = str(document.get("visibility") or "shared")
+    if visibility == "shared":
+        return True
+    if visibility == "private":
+        return str(document.get("owner_user_id", "")) == str(user.get("id", ""))
+    if visibility == "role":
+        allowed_roles = document.get("allowed_roles") or _json_list(str(document.get("allowed_roles_json", "[]")))
+        return str(user.get("role", "")).lower() in {str(role).lower() for role in allowed_roles}
+    return False
 
 
 def upsert_document(
@@ -138,15 +237,21 @@ def upsert_document(
     upload_path: str,
     upload_status: str,
     vision_calls_used: int,
+    owner_user_id: str = "",
+    visibility: str = "shared",
+    allowed_roles: list[str] | None = None,
 ) -> None:
+    normalized_roles = sorted({str(role).strip().lower() for role in (allowed_roles or []) if str(role).strip()})
+    normalized_visibility = visibility if visibility in {"private", "shared", "role"} else "shared"
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO documents (
                 file_hash, filename, chunk_count, document_id, embedding_model,
-                indexed_at, parsing_method, upload_path, upload_status, vision_calls_used
+                indexed_at, parsing_method, upload_path, upload_status, vision_calls_used,
+                owner_user_id, visibility, allowed_roles_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_hash) DO UPDATE SET
                 filename = excluded.filename,
                 chunk_count = excluded.chunk_count,
@@ -156,7 +261,13 @@ def upsert_document(
                 parsing_method = excluded.parsing_method,
                 upload_path = excluded.upload_path,
                 upload_status = excluded.upload_status,
-                vision_calls_used = excluded.vision_calls_used
+                vision_calls_used = excluded.vision_calls_used,
+                owner_user_id = CASE
+                    WHEN excluded.owner_user_id != '' THEN excluded.owner_user_id
+                    ELSE documents.owner_user_id
+                END,
+                visibility = excluded.visibility,
+                allowed_roles_json = excluded.allowed_roles_json
             """,
             (
                 file_hash,
@@ -169,6 +280,9 @@ def upsert_document(
                 upload_path,
                 upload_status,
                 int(vision_calls_used or 0),
+                owner_user_id,
+                normalized_visibility,
+                json.dumps(normalized_roles),
             ),
         )
 
@@ -179,7 +293,7 @@ def get_document(file_hash: str) -> dict[str, Any] | None:
             "SELECT * FROM documents WHERE file_hash = ?",
             (file_hash,),
         ).fetchone()
-    return dict(row) if row else None
+    return _decode_document_row(row) if row else None
 
 
 def document_exists(file_hash: str) -> bool:
@@ -191,7 +305,12 @@ def list_documents() -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT * FROM documents ORDER BY lower(filename), indexed_at DESC"
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [_decode_document_row(row) for row in rows]
+
+
+def list_documents_for_user(user: dict[str, Any]) -> list[dict[str, Any]]:
+    documents = list_documents()
+    return [doc for doc in documents if can_user_access_document(user, doc)]
 
 
 def delete_document(file_hash: str) -> dict[str, Any] | None:
@@ -203,12 +322,263 @@ def delete_document(file_hash: str) -> dict[str, Any] | None:
         if row is None:
             return None
         conn.execute("DELETE FROM documents WHERE file_hash = ?", (file_hash,))
-    return dict(row)
+    return _decode_document_row(row)
 
 
 def clear_documents() -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM documents")
+
+
+def update_document_permissions(
+    file_hash: str,
+    *,
+    visibility: str,
+    allowed_roles: list[str] | None = None,
+) -> dict[str, Any] | None:
+    normalized_visibility = visibility if visibility in {"private", "shared", "role"} else "shared"
+    normalized_roles = sorted({str(role).strip().lower() for role in (allowed_roles or []) if str(role).strip()})
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM documents WHERE file_hash = ?", (file_hash,)).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            """
+            UPDATE documents
+            SET visibility = ?, allowed_roles_json = ?
+            WHERE file_hash = ?
+            """,
+            (normalized_visibility, json.dumps(normalized_roles), file_hash),
+        )
+    return get_document(file_hash)
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210_000)
+    return f"pbkdf2_sha256$210000${salt}${digest.hex()}"
+
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations_raw, salt, expected_hex = stored_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations_raw),
+        )
+        return hmac.compare_digest(digest.hex(), expected_hex)
+    except Exception:
+        return False
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def users_exist() -> bool:
+    with _connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+    return bool(row and int(row["count"]) > 0)
+
+
+def create_user(
+    *,
+    user_id: str,
+    email: str,
+    password: str,
+    display_name: str = "",
+    role: str = "user",
+) -> dict[str, Any]:
+    now = int(time.time())
+    normalized_email = email.strip().lower()
+    normalized_role = role if role in {"admin", "user"} else "user"
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO users (
+                id, email, display_name, role, password_hash, disabled, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+            """,
+            (
+                user_id,
+                normalized_email,
+                display_name.strip() or normalized_email,
+                normalized_role,
+                _hash_password(password),
+                now,
+                now,
+            ),
+        )
+    return get_user(user_id) or {}
+
+
+def get_user(user_id: str) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, display_name, role, disabled, created_at, updated_at
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_email(email: str) -> dict[str, Any] | None:
+    normalized_email = email.strip().lower()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, display_name, role, disabled, created_at, updated_at
+            FROM users
+            WHERE lower(email) = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def authenticate_user(email: str, password: str) -> dict[str, Any] | None:
+    normalized_email = email.strip().lower()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE lower(email) = ?",
+            (normalized_email,),
+        ).fetchone()
+    if not row:
+        return None
+    payload = dict(row)
+    if int(payload.get("disabled", 0) or 0):
+        return None
+    if not _verify_password(password, str(payload.get("password_hash", ""))):
+        return None
+    payload.pop("password_hash", None)
+    return payload
+
+
+def create_auth_token(user_id: str, ttl_seconds: int) -> dict[str, Any]:
+    now = int(time.time())
+    token = secrets.token_urlsafe(32)
+    expires_at = now + max(60, int(ttl_seconds))
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO auth_tokens (token_hash, user_id, created_at, expires_at, revoked_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (_hash_token(token), user_id, now, expires_at),
+        )
+    return {"access_token": token, "token_type": "bearer", "expires_at": expires_at}
+
+
+def get_user_for_token(token: str) -> dict[str, Any] | None:
+    token_hash = _hash_token(token)
+    now = int(time.time())
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT u.id, u.email, u.display_name, u.role, u.disabled, u.created_at, u.updated_at
+            FROM auth_tokens t
+            JOIN users u ON u.id = t.user_id
+            WHERE t.token_hash = ?
+              AND t.revoked_at IS NULL
+              AND t.expires_at > ?
+              AND u.disabled = 0
+            """,
+            (token_hash, now),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_auth_token(token: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE auth_tokens SET revoked_at = ? WHERE token_hash = ?",
+            (int(time.time()), _hash_token(token)),
+        )
+
+
+def list_users() -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, email, display_name, role, disabled, created_at, updated_at
+            FROM users
+            ORDER BY lower(email)
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def allowed_file_hashes_for_user(user: dict[str, Any]) -> list[str]:
+    return [str(doc["file_hash"]) for doc in list_documents_for_user(user)]
+
+
+def record_audit_event(
+    *,
+    actor_user_id: str = "",
+    actor_email: str = "",
+    action: str,
+    resource_type: str = "",
+    resource_id: str = "",
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    created_at = int(time.time())
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO audit_events (
+                created_at, actor_user_id, actor_email, action,
+                resource_type, resource_id, detail_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                actor_user_id,
+                actor_email,
+                action,
+                resource_type,
+                resource_id,
+                json.dumps(detail or {}),
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+    return {
+        "id": event_id,
+        "created_at": created_at,
+        "actor_user_id": actor_user_id,
+        "actor_email": actor_email,
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "detail": detail or {},
+    }
+
+
+def list_audit_events(limit: int = 50) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM audit_events
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 200)),),
+        ).fetchall()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["detail"] = json.loads(item.pop("detail_json") or "{}")
+        events.append(item)
+    return events
 
 
 def record_feedback(
@@ -221,6 +591,7 @@ def record_feedback(
     confidence_score: float | None = None,
     sources: list[dict[str, Any]] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    user_id: str = "",
 ) -> dict[str, Any]:
     created_at = int(time.time())
     with _connect() as conn:
@@ -228,9 +599,9 @@ def record_feedback(
             """
             INSERT INTO feedback (
                 created_at, question, answer, rating, reason, comment,
-                confidence_score, sources_json, diagnostics_json
+                confidence_score, sources_json, diagnostics_json, user_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 created_at,
@@ -242,6 +613,7 @@ def record_feedback(
                 confidence_score,
                 json.dumps(sources or []),
                 json.dumps(diagnostics or {}),
+                user_id,
             ),
         )
         feedback_id = int(cursor.lastrowid)
@@ -286,6 +658,8 @@ def admin_summary() -> dict[str, Any]:
         ).fetchall()
         sessions_row = conn.execute("SELECT COUNT(*) AS count FROM chat_sessions").fetchone()
         eval_row = conn.execute("SELECT COUNT(*) AS count FROM eval_runs").fetchone()
+        users_row = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()
+        audit_row = conn.execute("SELECT COUNT(*) AS count FROM audit_events").fetchone()
 
     return {
         "document_count": int(doc_row["count"] if doc_row else 0),
@@ -293,22 +667,24 @@ def admin_summary() -> dict[str, Any]:
         "feedback_count": int(feedback_row["count"] if feedback_row else 0),
         "chat_session_count": int(sessions_row["count"] if sessions_row else 0),
         "eval_run_count": int(eval_row["count"] if eval_row else 0),
+        "user_count": int(users_row["count"] if users_row else 0),
+        "audit_event_count": int(audit_row["count"] if audit_row else 0),
         "recent_feedback": [dict(row) for row in recent_feedback],
         "metadata_db_path": str(_db_path()),
     }
 
 
-def create_ingestion_job(job_id: str, total_files: int) -> dict[str, Any]:
+def create_ingestion_job(job_id: str, total_files: int, created_by_user_id: str = "") -> dict[str, Any]:
     now = int(time.time())
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO ingestion_jobs (
-                id, created_at, updated_at, status, stage, message, total_files
+                id, created_at, updated_at, status, stage, message, total_files, created_by_user_id
             )
-            VALUES (?, ?, ?, 'queued', 'queued', 'Queued for ingestion.', ?)
+            VALUES (?, ?, ?, 'queued', 'queued', 'Queued for ingestion.', ?, ?)
             """,
-            (job_id, now, now, int(total_files)),
+            (job_id, now, now, int(total_files), created_by_user_id),
         )
     return get_ingestion_job(job_id) or {}
 
@@ -371,12 +747,12 @@ def get_ingestion_job(job_id: str) -> dict[str, Any] | None:
     return item
 
 
-def create_chat_session(session_id: str, title: str) -> dict[str, Any]:
+def create_chat_session(session_id: str, title: str, user_id: str = "") -> dict[str, Any]:
     now = int(time.time())
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO chat_sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (session_id, title, now, now),
+            "INSERT INTO chat_sessions (id, title, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?)",
+            (session_id, title, now, now, user_id),
         )
     return get_chat_session(session_id) or {}
 
@@ -387,12 +763,18 @@ def get_chat_session(session_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def list_chat_sessions(limit: int = 30) -> list[dict[str, Any]]:
+def list_chat_sessions(limit: int = 30, user_id: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?",
-            (max(1, min(int(limit), 100)),),
-        ).fetchall()
+        if include_all or user_id is None:
+            rows = conn.execute(
+                "SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (user_id, max(1, min(int(limit), 100))),
+            ).fetchall()
     return [dict(row) for row in rows]
 
 

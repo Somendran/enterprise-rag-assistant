@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import upload, query, ops
+from app.api import auth, upload, query, ops
 from app.config import settings
 from app.services.vector_store import load_store
 from app.utils.logger import get_logger
@@ -53,6 +53,7 @@ app.add_middleware(
 app.include_router(upload.router, tags=["Ingestion"])
 app.include_router(query.router, tags=["Retrieval & Generation"])
 app.include_router(ops.router, tags=["Ops"])
+app.include_router(auth.router)
 
 
 # Health check

@@ -7,12 +7,14 @@ import sys
 import threading
 from pathlib import Path
 from uuid import uuid4
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.security import require_api_key
+from app.api.security import AuthContext, require_admin, require_user
 from app.config import settings
 from app.models.schemas import (
     AdminOverviewResponse,
+    AuditEventItem,
+    AuditEventsResponse,
     ChatMessageItem,
     ChatMessageRequest,
     ChatMessagesResponse,
@@ -37,7 +39,7 @@ if str(_repo_root) not in sys.path:
 
 from evals.run_eval import DEFAULT_EVAL_FILE, load_evals, score_eval
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
 
 
 def _check_import(name: str, module: str) -> ModelHealthItem:
@@ -54,7 +56,7 @@ def _check_import(name: str, module: str) -> ModelHealthItem:
     status_code=status.HTTP_200_OK,
     summary="Model dependency health",
 )
-async def model_health() -> ModelHealthResponse:
+async def model_health(_: AuthContext = Depends(require_user)) -> ModelHealthResponse:
     checks: list[ModelHealthItem] = [
         ModelHealthItem(
             name="embedding_config",
@@ -109,7 +111,10 @@ async def model_health() -> ModelHealthResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Record answer feedback",
 )
-async def record_answer_feedback(request: FeedbackRequest) -> FeedbackResponse:
+async def record_answer_feedback(
+    request: FeedbackRequest,
+    current_user: AuthContext = Depends(require_user),
+) -> FeedbackResponse:
     stored = metadata_store.record_feedback(
         question=request.question,
         answer=request.answer,
@@ -119,6 +124,15 @@ async def record_answer_feedback(request: FeedbackRequest) -> FeedbackResponse:
         confidence_score=request.confidence_score,
         sources=[src.model_dump() for src in request.sources],
         diagnostics=request.diagnostics.model_dump() if request.diagnostics else {},
+        user_id=current_user.id,
+    )
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="feedback.record",
+        resource_type="feedback",
+        resource_id=str(stored.get("id", "")),
+        detail={"rating": request.rating, "reason": request.reason},
     )
     return FeedbackResponse(**stored)
 
@@ -129,8 +143,14 @@ async def record_answer_feedback(request: FeedbackRequest) -> FeedbackResponse:
     status_code=status.HTTP_200_OK,
     summary="List chat sessions",
 )
-async def list_chat_sessions() -> ChatSessionsResponse:
-    sessions = [ChatSessionItem(**item) for item in metadata_store.list_chat_sessions()]
+async def list_chat_sessions(current_user: AuthContext = Depends(require_user)) -> ChatSessionsResponse:
+    sessions = [
+        ChatSessionItem(**item)
+        for item in metadata_store.list_chat_sessions(
+            user_id=current_user.id,
+            include_all=current_user.role == "admin" or current_user.is_system_admin,
+        )
+    ]
     return ChatSessionsResponse(sessions=sessions)
 
 
@@ -140,9 +160,19 @@ async def list_chat_sessions() -> ChatSessionsResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Create chat session",
 )
-async def create_chat_session(request: ChatSessionCreateRequest) -> ChatSessionItem:
+async def create_chat_session(
+    request: ChatSessionCreateRequest,
+    current_user: AuthContext = Depends(require_user),
+) -> ChatSessionItem:
     session_id = uuid4().hex
-    session = metadata_store.create_chat_session(session_id, request.title.strip() or "New chat")
+    session = metadata_store.create_chat_session(session_id, request.title.strip() or "New chat", user_id=current_user.id)
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="chat.create",
+        resource_type="chat_session",
+        resource_id=session_id,
+    )
     return ChatSessionItem(**session)
 
 
@@ -152,7 +182,15 @@ async def create_chat_session(request: ChatSessionCreateRequest) -> ChatSessionI
     status_code=status.HTTP_200_OK,
     summary="List chat session messages",
 )
-async def list_chat_messages(session_id: str) -> ChatMessagesResponse:
+async def list_chat_messages(
+    session_id: str,
+    current_user: AuthContext = Depends(require_user),
+) -> ChatMessagesResponse:
+    session = metadata_store.get_chat_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    if current_user.role != "admin" and not current_user.is_system_admin and str(session.get("user_id", "")) != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot access this chat session.")
     messages = [ChatMessageItem(**item) for item in metadata_store.list_chat_messages(session_id)]
     return ChatMessagesResponse(messages=messages)
 
@@ -163,9 +201,16 @@ async def list_chat_messages(session_id: str) -> ChatMessagesResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Store chat message",
 )
-async def add_chat_message(session_id: str, request: ChatMessageRequest) -> ChatMessageItem:
-    if metadata_store.get_chat_session(session_id) is None:
-        metadata_store.create_chat_session(session_id, "New chat")
+async def add_chat_message(
+    session_id: str,
+    request: ChatMessageRequest,
+    current_user: AuthContext = Depends(require_user),
+) -> ChatMessageItem:
+    session = metadata_store.get_chat_session(session_id)
+    if session is None:
+        metadata_store.create_chat_session(session_id, "New chat", user_id=current_user.id)
+    elif current_user.role != "admin" and not current_user.is_system_admin and str(session.get("user_id", "")) != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot update this chat session.")
 
     message = metadata_store.add_chat_message(
         message_id=request.id or uuid4().hex,
@@ -180,13 +225,18 @@ async def add_chat_message(session_id: str, request: ChatMessageRequest) -> Chat
     return ChatMessageItem(**{**message, "sources": request.sources, "diagnostics": request.diagnostics})
 
 
-def _run_eval_background(run_id: str, eval_file: Path) -> None:
+def _run_eval_background(run_id: str, eval_file: Path, current_user: AuthContext) -> None:
     results: list[dict] = []
     try:
         evals = load_evals(eval_file)
         for item in evals:
             try:
-                payload = run_rag_pipeline(str(item["question"]))
+                allowed_file_hashes = metadata_store.allowed_file_hashes_for_user(current_user.as_user())
+                payload = run_rag_pipeline(
+                    str(item["question"]),
+                    allowed_file_hashes=allowed_file_hashes,
+                    access_scope=current_user.id,
+                )
                 result = score_eval(
                     item,
                     {
@@ -235,11 +285,19 @@ def _run_eval_background(run_id: str, eval_file: Path) -> None:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Start a background eval run",
 )
-async def create_eval_run() -> EvalRunCreateResponse:
+async def create_eval_run(current_user: AuthContext = Depends(require_admin)) -> EvalRunCreateResponse:
     evals = load_evals(DEFAULT_EVAL_FILE)
     run_id = uuid4().hex
     run = metadata_store.create_eval_run(run_id, total=len(evals))
-    threading.Thread(target=_run_eval_background, args=(run_id, DEFAULT_EVAL_FILE), daemon=True).start()
+    threading.Thread(target=_run_eval_background, args=(run_id, DEFAULT_EVAL_FILE, current_user), daemon=True).start()
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="eval.start",
+        resource_type="eval_run",
+        resource_id=run_id,
+        detail={"total": len(evals)},
+    )
     return EvalRunCreateResponse(run_id=run_id, status=str(run.get("status", "running")), total=len(evals))
 
 
@@ -249,7 +307,7 @@ async def create_eval_run() -> EvalRunCreateResponse:
     status_code=status.HTTP_200_OK,
     summary="List eval runs",
 )
-async def list_eval_runs() -> EvalRunsResponse:
+async def list_eval_runs(_: AuthContext = Depends(require_admin)) -> EvalRunsResponse:
     return EvalRunsResponse(runs=[EvalRunItem(**item) for item in metadata_store.list_eval_runs()])
 
 
@@ -259,10 +317,9 @@ async def list_eval_runs() -> EvalRunsResponse:
     status_code=status.HTTP_200_OK,
     summary="Get eval run",
 )
-async def get_eval_run(run_id: str) -> EvalRunItem:
+async def get_eval_run(run_id: str, _: AuthContext = Depends(require_admin)) -> EvalRunItem:
     run = metadata_store.get_eval_run(run_id)
     if run is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Eval run not found.")
     return EvalRunItem(**run)
 
@@ -273,7 +330,7 @@ async def get_eval_run(run_id: str) -> EvalRunItem:
     status_code=status.HTTP_200_OK,
     summary="Local admin/debug overview",
 )
-async def admin_overview() -> AdminOverviewResponse:
+async def admin_overview(_: AuthContext = Depends(require_admin)) -> AdminOverviewResponse:
     # Forces one-time migration from the previous JSON document registry.
     list_indexed_documents()
     summary = metadata_store.admin_summary()
@@ -285,3 +342,13 @@ async def admin_overview() -> AdminOverviewResponse:
         reranker_enabled=settings.enable_neural_reranker,
         openai_enabled=settings.use_openai,
     )
+
+
+@router.get(
+    "/admin/audit-log",
+    response_model=AuditEventsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List recent audit events",
+)
+async def audit_log(_: AuthContext = Depends(require_admin)) -> AuditEventsResponse:
+    return AuditEventsResponse(events=[AuditEventItem(**item) for item in metadata_store.list_audit_events()])

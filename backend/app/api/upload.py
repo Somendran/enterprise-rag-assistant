@@ -8,9 +8,9 @@ import threading
 from uuid import uuid4
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, File, status
 
-from app.api.security import require_api_key
+from app.api.security import AuthContext, require_admin, require_user
 from app.api.upload_validation import safe_pdf_filename, validate_pdf_upload
 from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents, chunk_structured_blocks
@@ -37,13 +37,14 @@ from app.models.schemas import (
     ResetKnowledgeBaseResponse,
     DeleteKnowledgeBaseFileResponse,
     DocumentChunksResponse,
+    DocumentPermissionsUpdateRequest,
 )
 from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
 
 
 def _stored_upload_path(file_hash: str, filename: str) -> Path:
@@ -78,6 +79,9 @@ def _prepare_chunks_for_indexing(
     filename: str,
     file_hash: str,
     document_id: str,
+    owner_user_id: str = "",
+    visibility: str = "shared",
+    allowed_roles: list[str] | None = None,
 ) -> tuple[list, str, int]:
     chunks = []
     vision_calls_used = 0
@@ -121,6 +125,9 @@ def _prepare_chunks_for_indexing(
                 "source": filename,
                 "file_hash": file_hash,
                 "document_id": document_id,
+                "owner_user_id": owner_user_id,
+                "visibility": visibility,
+                "allowed_roles": allowed_roles or [],
                 "parsing_method": parsing_method,
                 "chunk_index": idx,
                 "indexed_at": indexed_at,
@@ -146,9 +153,25 @@ def _job_response(payload: dict) -> IngestionJobStatusResponse:
     return IngestionJobStatusResponse(**normalized)
 
 
+def _parse_allowed_roles(raw: str = "") -> list[str]:
+    return [
+        item.strip().lower()
+        for item in raw.split(",")
+        if item.strip()
+    ]
+
+
+def _normalize_visibility(raw: str = "shared") -> str:
+    value = (raw or "shared").strip().lower()
+    return value if value in {"private", "shared", "role"} else "shared"
+
+
 def _ingest_saved_files(
     saved_files: list[dict],
     job_id: str | None = None,
+    current_user: AuthContext | None = None,
+    visibility: str = "shared",
+    allowed_roles: list[str] | None = None,
 ) -> UploadBatchResponse:
     results: list[UploadItemResult] = []
     total_chunks_indexed = 0
@@ -174,6 +197,18 @@ def _ingest_saved_files(
             existing = get_indexed_document(file_hash) or {}
             if file_path.exists():
                 os.remove(file_path)
+            if current_user is not None and not metadata_store.can_user_access_document(current_user.as_user(), existing):
+                results.append(
+                    UploadItemResult(
+                        filename=safe_filename,
+                        chunks_indexed=0,
+                        status="failed",
+                        message="Duplicate document already exists, but your account cannot access it.",
+                        file_hash=file_hash,
+                        document_id=str(existing.get("document_id", document_id)),
+                    )
+                )
+                continue
             results.append(
                 UploadItemResult(
                     filename=safe_filename,
@@ -194,6 +229,9 @@ def _ingest_saved_files(
                 filename=safe_filename,
                 file_hash=file_hash,
                 document_id=document_id,
+                owner_user_id=current_user.id if current_user else "",
+                visibility=visibility,
+                allowed_roles=allowed_roles,
             )
 
             if job_id:
@@ -217,6 +255,9 @@ def _ingest_saved_files(
                 upload_path=str(file_path),
                 upload_status="indexed",
                 vision_calls_used=vision_calls_used,
+                owner_user_id=current_user.id if current_user else "",
+                visibility=visibility,
+                allowed_roles=allowed_roles,
             )
             total_chunks_indexed += len(chunks)
             results.append(
@@ -263,8 +304,11 @@ def _ingest_saved_files(
     summary="List indexed files",
     description="Returns persisted indexed document metadata for UI hydration on reload.",
 )
-async def list_knowledge_base_files() -> KnowledgeBaseFilesResponse:
-    files = list_indexed_documents()
+async def list_knowledge_base_files(
+    current_user: AuthContext = Depends(require_user),
+) -> KnowledgeBaseFilesResponse:
+    list_indexed_documents()
+    files = metadata_store.list_documents_for_user(current_user.as_user())
     return KnowledgeBaseFilesResponse(files=files)
 
 
@@ -279,6 +323,7 @@ async def list_knowledge_base_file_chunks(
     file_hash: str,
     focus_chunk_index: int | None = Query(default=None, ge=0),
     neighbor_window: int = Query(default=0, ge=0, le=20),
+    current_user: AuthContext = Depends(require_user),
 ) -> DocumentChunksResponse:
     meta = get_indexed_document(file_hash)
     if meta is None:
@@ -286,6 +331,8 @@ async def list_knowledge_base_file_chunks(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found.",
         )
+    if not metadata_store.can_user_access_document(current_user.as_user(), meta):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot access this document.")
     chunks = list_document_chunks(
         file_hash,
         focus_chunk_index=focus_chunk_index,
@@ -299,6 +346,47 @@ async def list_knowledge_base_file_chunks(
     )
 
 
+@router.patch(
+    "/knowledge-base/files/{file_hash}/permissions",
+    response_model=KnowledgeBaseFilesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update document permissions",
+)
+async def update_knowledge_base_file_permissions(
+    file_hash: str,
+    request: DocumentPermissionsUpdateRequest,
+    current_user: AuthContext = Depends(require_user),
+) -> KnowledgeBaseFilesResponse:
+    meta = get_indexed_document(file_hash)
+    if meta is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    if not metadata_store.can_user_access_document(current_user.as_user(), meta, write=True):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot manage this document.")
+
+    updated = metadata_store.update_document_permissions(
+        file_hash,
+        visibility=request.visibility,
+        allowed_roles=request.allowed_roles,
+    )
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    clear_query_cache()
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="document.permissions.update",
+        resource_type="document",
+        resource_id=file_hash,
+        detail={
+            "filename": str(updated.get("filename", "")),
+            "visibility": str(updated.get("visibility", "")),
+            "allowed_roles": list(updated.get("allowed_roles", [])),
+        },
+    )
+    files = metadata_store.list_documents_for_user(current_user.as_user())
+    return KnowledgeBaseFilesResponse(files=files)
+
+
 @router.post(
     "/knowledge-base/reset",
     response_model=ResetKnowledgeBaseResponse,
@@ -306,7 +394,9 @@ async def list_knowledge_base_file_chunks(
     summary="Reset knowledge base",
     description="Deletes uploaded PDFs and clears persisted vector index data.",
 )
-async def reset_knowledge_base() -> ResetKnowledgeBaseResponse:
+async def reset_knowledge_base(
+    current_user: AuthContext = Depends(require_admin),
+) -> ResetKnowledgeBaseResponse:
     """Clear indexed data and uploaded files for a fresh knowledge base state."""
     uploads_deleted = 0
     upload_dir = Path(settings.upload_dir)
@@ -322,6 +412,13 @@ async def reset_knowledge_base() -> ResetKnowledgeBaseResponse:
 
         index_cleared = reset_vector_store()
         clear_query_cache()
+        metadata_store.record_audit_event(
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            action="knowledge_base.reset",
+            resource_type="knowledge_base",
+            detail={"uploads_deleted": uploads_deleted, "index_cleared": index_cleared},
+        )
         logger.info(
             "Knowledge base reset completed | uploads_deleted=%d index_cleared=%s",
             uploads_deleted,
@@ -347,7 +444,10 @@ async def reset_knowledge_base() -> ResetKnowledgeBaseResponse:
     summary="Delete one indexed file",
     description="Removes one document from FAISS, the document registry, and stored uploads.",
 )
-async def delete_knowledge_base_file(file_hash: str) -> DeleteKnowledgeBaseFileResponse:
+async def delete_knowledge_base_file(
+    file_hash: str,
+    current_user: AuthContext = Depends(require_user),
+) -> DeleteKnowledgeBaseFileResponse:
     try:
         meta = get_indexed_document(file_hash)
         if meta is None:
@@ -355,6 +455,8 @@ async def delete_knowledge_base_file(file_hash: str) -> DeleteKnowledgeBaseFileR
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Document not found.",
             )
+        if not metadata_store.can_user_access_document(current_user.as_user(), meta, write=True):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot delete this document.")
 
         delete_result = delete_indexed_document(file_hash)
         upload_deleted = _delete_stored_upload(
@@ -363,6 +465,17 @@ async def delete_knowledge_base_file(file_hash: str) -> DeleteKnowledgeBaseFileR
             upload_path=str(meta.get("upload_path", "")),
         )
         clear_query_cache()
+        metadata_store.record_audit_event(
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            action="document.delete",
+            resource_type="document",
+            resource_id=file_hash,
+            detail={
+                "filename": str(meta.get("filename", "")),
+                "chunks_deleted": int(delete_result.get("chunks_deleted", 0) or 0),
+            },
+        )
         return DeleteKnowledgeBaseFileResponse(
             file_hash=file_hash,
             filename=str(meta.get("filename", "")),
@@ -387,13 +500,18 @@ async def delete_knowledge_base_file(file_hash: str) -> DeleteKnowledgeBaseFileR
     summary="Reindex one stored file",
     description="Rebuilds chunks and vectors for a stored PDF without requiring another upload.",
 )
-async def reindex_knowledge_base_file(file_hash: str) -> UploadItemResult:
+async def reindex_knowledge_base_file(
+    file_hash: str,
+    current_user: AuthContext = Depends(require_user),
+) -> UploadItemResult:
     meta = get_indexed_document(file_hash)
     if meta is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found.",
         )
+    if not metadata_store.can_user_access_document(current_user.as_user(), meta, write=True):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot reindex this document.")
 
     filename = str(meta.get("filename", ""))
     stored_path = _find_stored_upload(
@@ -417,6 +535,9 @@ async def reindex_knowledge_base_file(file_hash: str) -> UploadItemResult:
             filename=filename,
             file_hash=file_hash,
             document_id=document_id,
+            owner_user_id=str(meta.get("owner_user_id", "")),
+            visibility=str(meta.get("visibility", "shared")),
+            allowed_roles=list(meta.get("allowed_roles", [])),
         )
         delete_indexed_document(file_hash)
         add_documents(chunks)
@@ -429,8 +550,19 @@ async def reindex_knowledge_base_file(file_hash: str) -> UploadItemResult:
             upload_path=str(stored_path),
             upload_status="indexed",
             vision_calls_used=vision_calls_used,
+            owner_user_id=str(meta.get("owner_user_id", "")),
+            visibility=str(meta.get("visibility", "shared")),
+            allowed_roles=list(meta.get("allowed_roles", [])),
         )
         clear_query_cache()
+        metadata_store.record_audit_event(
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            action="document.reindex",
+            resource_type="document",
+            resource_id=file_hash,
+            detail={"filename": filename, "chunks_indexed": len(chunks)},
+        )
         return UploadItemResult(
             filename=filename,
             chunks_indexed=len(chunks),
@@ -460,7 +592,12 @@ async def reindex_knowledge_base_file(file_hash: str) -> UploadItemResult:
         "Returns per-file outcomes and aggregate indexing counts."
     ),
 )
-async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchResponse:
+async def upload_document(
+    files: list[UploadFile] = File(...),
+    visibility: str = Form(default="shared"),
+    allowed_roles: str = Form(default=""),
+    current_user: AuthContext = Depends(require_user),
+) -> UploadBatchResponse:
     """Ingest one or more PDFs into the RAG knowledge base."""
 
     if not files:
@@ -533,7 +670,14 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
                 )
             )
 
-    response = _ingest_saved_files(saved_files)
+    normalized_visibility = _normalize_visibility(visibility)
+    parsed_roles = _parse_allowed_roles(allowed_roles)
+    response = _ingest_saved_files(
+        saved_files,
+        current_user=current_user,
+        visibility=normalized_visibility,
+        allowed_roles=parsed_roles,
+    )
     results = failed_results + response.files
     processed_files = sum(1 for item in results if item.status in {"success", "duplicate"})
     total_chunks_indexed = sum(item.chunks_indexed for item in results if item.status == "success")
@@ -551,6 +695,19 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
         total_chunks_indexed=total_chunks_indexed,
         message=f"Upload completed. Processed {processed_files}/{len(files)} files.",
     )
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="document.upload",
+        resource_type="document",
+        detail={
+            "total_files": len(files),
+            "processed_files": processed_files,
+            "total_chunks_indexed": total_chunks_indexed,
+            "visibility": normalized_visibility,
+            "allowed_roles": parsed_roles,
+        },
+    )
 
 
 @router.post(
@@ -559,7 +716,12 @@ async def upload_document(files: list[UploadFile] = File(...)) -> UploadBatchRes
     status_code=status.HTTP_202_ACCEPTED,
     summary="Upload PDFs and ingest them in the background",
 )
-async def upload_document_job(files: list[UploadFile] = File(...)) -> IngestionJobResponse:
+async def upload_document_job(
+    files: list[UploadFile] = File(...),
+    visibility: str = Form(default="shared"),
+    allowed_roles: str = Form(default=""),
+    current_user: AuthContext = Depends(require_user),
+) -> IngestionJobResponse:
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -569,7 +731,9 @@ async def upload_document_job(files: list[UploadFile] = File(...)) -> IngestionJ
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     job_id = uuid4().hex
-    metadata_store.create_ingestion_job(job_id, total_files=len(files))
+    normalized_visibility = _normalize_visibility(visibility)
+    parsed_roles = _parse_allowed_roles(allowed_roles)
+    metadata_store.create_ingestion_job(job_id, total_files=len(files), created_by_user_id=current_user.id)
     saved_files: list[dict] = []
     early_results: list[UploadItemResult] = []
 
@@ -637,7 +801,13 @@ async def upload_document_job(files: list[UploadFile] = File(...)) -> IngestionJ
 
     def _worker() -> None:
         try:
-            response = _ingest_saved_files(saved_files, job_id=job_id)
+            response = _ingest_saved_files(
+                saved_files,
+                job_id=job_id,
+                current_user=current_user,
+                visibility=normalized_visibility,
+                allowed_roles=parsed_roles,
+            )
             results = early_results + response.files
             processed = sum(1 for result in results if result.status in {"success", "duplicate"})
             total_chunks = sum(result.chunks_indexed for result in results if result.status == "success")
@@ -652,6 +822,20 @@ async def upload_document_job(files: list[UploadFile] = File(...)) -> IngestionJ
                 results=[_result_to_dict(result) for result in results],
             )
             clear_query_cache()
+            metadata_store.record_audit_event(
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                action="document.upload_job.completed",
+                resource_type="ingestion_job",
+                resource_id=job_id,
+                detail={
+                    "total_files": len(files),
+                    "processed_files": processed,
+                    "total_chunks_indexed": total_chunks,
+                    "visibility": normalized_visibility,
+                    "allowed_roles": parsed_roles,
+                },
+            )
         except Exception as exc:
             logger.error("Background ingestion job failed | job_id=%s error=%s", job_id, exc, exc_info=True)
             metadata_store.update_ingestion_job(
@@ -660,6 +844,14 @@ async def upload_document_job(files: list[UploadFile] = File(...)) -> IngestionJ
                 stage="failed",
                 message=str(exc),
                 results=[_result_to_dict(result) for result in early_results],
+            )
+            metadata_store.record_audit_event(
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                action="document.upload_job.failed",
+                resource_type="ingestion_job",
+                resource_id=job_id,
+                detail={"error": str(exc)},
             )
 
     threading.Thread(target=_worker, daemon=True).start()
@@ -678,8 +870,13 @@ async def upload_document_job(files: list[UploadFile] = File(...)) -> IngestionJ
     status_code=status.HTTP_200_OK,
     summary="Get background ingestion job status",
 )
-async def get_upload_job(job_id: str) -> IngestionJobStatusResponse:
+async def get_upload_job(
+    job_id: str,
+    current_user: AuthContext = Depends(require_user),
+) -> IngestionJobStatusResponse:
     payload = metadata_store.get_ingestion_job(job_id)
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ingestion job not found.")
+    if current_user.role != "admin" and str(payload.get("created_by_user_id", "")) not in {"", current_user.id}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot access this ingestion job.")
     return _job_response(payload)

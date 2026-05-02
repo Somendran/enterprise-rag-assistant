@@ -7,7 +7,8 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from app.api.security import require_api_key
+from app.api.security import AuthContext, require_user
+from app.services import metadata_store
 from app.services.rag_pipeline import run_rag_pipeline
 from app.models.schemas import QueryRequest, QueryResponse
 from app.config import settings
@@ -15,7 +16,7 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter()
 
 
 @router.post(
@@ -28,14 +29,22 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
         "and uses an LLM to generate a grounded answer with source citations."
     ),
 )
-async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
+async def query_knowledge_base(
+    request: QueryRequest,
+    current_user: AuthContext = Depends(require_user),
+) -> QueryResponse:
     """Answer a question using the RAG pipeline."""
 
     start_time = time.perf_counter()
     logger.info(f"Query received: '{request.question[:100]}'")
 
     try:
-        result = run_rag_pipeline(request.question)
+        allowed_file_hashes = metadata_store.allowed_file_hashes_for_user(current_user.as_user())
+        result = run_rag_pipeline(
+            request.question,
+            allowed_file_hashes=allowed_file_hashes,
+            access_scope=current_user.id,
+        )
     except RuntimeError as e:
         message = str(e)
         lowered = message.lower()
@@ -70,6 +79,17 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
         result.confidence_level,
         [s.document for s in result.sources],
     )
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="query.run",
+        resource_type="query",
+        detail={
+            "question_preview": request.question[:160],
+            "sources": [s.document for s in result.sources],
+            "confidence_score": result.confidence_score,
+        },
+    )
 
     return QueryResponse(
         answer=result.answer,
@@ -86,7 +106,10 @@ async def query_knowledge_base(request: QueryRequest) -> QueryResponse:
     summary="Ask a question with streaming response",
     description="Streams answer chunks in real-time via Server-Sent Events.",
 )
-async def query_knowledge_base_stream(request: QueryRequest) -> StreamingResponse:
+async def query_knowledge_base_stream(
+    request: QueryRequest,
+    current_user: AuthContext = Depends(require_user),
+) -> StreamingResponse:
     """Answer a question using streaming SSE events: chunk, done, error."""
 
     def _sse_event(event: str, data: dict) -> str:
@@ -103,7 +126,13 @@ async def query_knowledge_base_stream(request: QueryRequest) -> StreamingRespons
 
         try:
             logger.info("Streaming query received: '%s'", request.question[:100])
-            result = run_rag_pipeline(request.question, stream_callback=_on_chunk)
+            allowed_file_hashes = metadata_store.allowed_file_hashes_for_user(current_user.as_user())
+            result = run_rag_pipeline(
+                request.question,
+                stream_callback=_on_chunk,
+                allowed_file_hashes=allowed_file_hashes,
+                access_scope=current_user.id,
+            )
             elapsed = time.perf_counter() - start_time
             logger.info(
                 "Streaming query answered in %.2fs | confidence=%.3f level=%s",
@@ -118,6 +147,17 @@ async def query_knowledge_base_stream(request: QueryRequest) -> StreamingRespons
                 "confidence_level": result.confidence_level,
                 "diagnostics": result.diagnostics.model_dump() if settings.enable_retrieval_diagnostics else None,
             }
+            metadata_store.record_audit_event(
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                action="query.stream",
+                resource_type="query",
+                detail={
+                    "question_preview": request.question[:160],
+                    "sources": [src.document for src in result.sources],
+                    "confidence_score": result.confidence_score,
+                },
+            )
             events.put(("done", payload))
         except Exception as exc:
             logger.error("Streaming pipeline error: %s", exc, exc_info=True)
