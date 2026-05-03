@@ -58,6 +58,8 @@ def _normalize_block_type(raw_type: str) -> str:
         return "heading"
     if "table" in value:
         return "table"
+    if "list" in value or value in {"bullet", "ordered_list", "unordered_list"}:
+        return "list"
     if value in {"image", "figure", "chart", "visual"}:
         return "image"
     return "paragraph"
@@ -362,7 +364,7 @@ def parse_document(file_path: str, force_ocr: bool | None = None) -> List[Dict]:
     Returns normalized blocks with keys:
     {
       "id": str,
-      "type": "heading" | "paragraph" | "table" | "image",
+      "type": "heading" | "paragraph" | "table" | "list" | "image",
       "content": str,
       "page": int,
       "bbox": Optional[dict],

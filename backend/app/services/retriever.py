@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from langchain.schema import Document
 
+from app.services import metadata_store
+from app.services.embedding_service import resolve_embedding_model_name
 from app.services.vector_store import get_or_create_store
 from app.services.reranker import rerank_documents
 from app.config import settings
@@ -296,6 +298,136 @@ def _get_store_documents(store) -> list[Document]:
     return [doc for doc in backing.values() if isinstance(doc, Document) and doc.page_content.strip()]
 
 
+def _bm25_tokenize(text: str) -> list[str]:
+    return str(text or "").lower().split()
+
+
+def rrf_fuse(faiss_ids: list[str], bm25_ids: list[str], k: int = 60) -> list[str]:
+    scores: dict[str, float] = {}
+    for rank, doc_id in enumerate(faiss_ids):
+        scores[doc_id] = scores.get(doc_id, 0.0) + 1 / (k + rank + 1)
+    for rank, doc_id in enumerate(bm25_ids):
+        scores[doc_id] = scores.get(doc_id, 0.0) + 1 / (k + rank + 1)
+    return sorted(scores, key=scores.get, reverse=True)
+
+
+def _sqlite_chunk_documents(
+    allowed_file_hashes: set[str] | None = None,
+) -> dict[str, Document]:
+    rows = metadata_store.list_vector_chunks(resolve_embedding_model_name())
+    documents: dict[str, Document] = {}
+    for row in rows:
+        docstore_id = str(row.get("docstore_id", ""))
+        metadata = dict(row.get("metadata", {}) or {})
+        if not docstore_id:
+            continue
+        if allowed_file_hashes is not None and str(metadata.get("file_hash", "")) not in allowed_file_hashes:
+            continue
+        content = str(row.get("content", "") or "")
+        if not content.strip():
+            continue
+        documents[docstore_id] = Document(page_content=content, metadata=metadata)
+    return documents
+
+
+def _retrieve_bm25_ranked_ids(
+    documents_by_id: dict[str, Document],
+    question: str,
+    top_k: int,
+) -> tuple[list[str], dict[str, float], int]:
+    if not documents_by_id:
+        return [], {}, 0
+
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        logger.warning("rank_bm25 is not installed; hybrid BM25 retrieval is disabled for this query.")
+        return [], {}, len(documents_by_id)
+
+    doc_ids = list(documents_by_id.keys())
+    tokenized_corpus = [_bm25_tokenize(documents_by_id[doc_id].page_content) for doc_id in doc_ids]
+    query_tokens = _bm25_tokenize(question)
+    if not query_tokens:
+        return [], {}, len(documents_by_id)
+
+    bm25 = BM25Okapi(tokenized_corpus)
+    raw_scores = bm25.get_scores(query_tokens)
+    max_score = max(raw_scores) if len(raw_scores) else 0.0
+    if max_score <= 0:
+        return [], {}, len(documents_by_id)
+
+    limit = max(1, int(top_k))
+    ranked_indexes = sorted(
+        range(len(doc_ids)),
+        key=lambda idx: float(raw_scores[idx]),
+        reverse=True,
+    )[:limit]
+    ranked_ids = [doc_ids[idx] for idx in ranked_indexes if float(raw_scores[idx]) > 0]
+    scores = {doc_ids[idx]: float(raw_scores[idx]) / float(max_score) for idx in ranked_indexes}
+    return ranked_ids, scores, len(documents_by_id)
+
+
+def _retrieve_hybrid_rrf_candidates(
+    store,
+    question: str,
+    query_variants: list[str],
+    k: int,
+    allowed_file_hashes: set[str] | None = None,
+) -> tuple[list[RetrievedChunk], int]:
+    overfetch_k = max(1, int(k) * 2)
+    documents_by_id = _sqlite_chunk_documents(allowed_file_hashes)
+    doc_id_by_key = {_doc_key(doc): doc_id for doc_id, doc in documents_by_id.items()}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        faiss_future = executor.submit(
+            _retrieve_candidates,
+            store,
+            question,
+            query_variants,
+            overfetch_k,
+            allowed_file_hashes,
+        )
+        bm25_future = executor.submit(
+            _retrieve_bm25_ranked_ids,
+            documents_by_id,
+            question,
+            overfetch_k,
+        )
+        ranked_faiss, considered_faiss = faiss_future.result()
+        ranked_bm25_ids, bm25_scores_by_id, considered_bm25 = bm25_future.result()
+
+    faiss_ids: list[str] = []
+    faiss_scores_by_id: dict[str, float] = {}
+    for item in ranked_faiss:
+        doc_id = doc_id_by_key.get(_doc_key(item.document))
+        if not doc_id:
+            continue
+        if doc_id not in faiss_scores_by_id:
+            faiss_ids.append(doc_id)
+        faiss_scores_by_id[doc_id] = max(faiss_scores_by_id.get(doc_id, 0.0), item.vector_confidence)
+
+    fused_ids = rrf_fuse(faiss_ids, ranked_bm25_ids)[: max(1, int(k))]
+    fused: list[RetrievedChunk] = []
+    for doc_id in fused_ids:
+        doc = documents_by_id.get(doc_id)
+        if doc is None:
+            continue
+        vector_conf = faiss_scores_by_id.get(doc_id, 0.0)
+        bm25_score = bm25_scores_by_id.get(doc_id, 0.0)
+        lexical = _lexical_overlap_score(question, doc.page_content)
+        fused.append(
+            RetrievedChunk(
+                document=doc,
+                vector_confidence=vector_conf,
+                lexical_score=lexical,
+                bm25_score=bm25_score,
+                final_score=_combine_score(vector_conf, lexical, bm25_score),
+            )
+        )
+
+    return fused, considered_faiss + considered_bm25
+
+
 def _retrieve_bm25_candidates(
     store,
     question: str,
@@ -496,48 +628,22 @@ def retrieve_relevant_chunks_with_diagnostics(
         question[:80],
     )
 
-    bm25_k = max(final_top_n, int(settings.bm25_top_k))
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        vector_future = executor.submit(
-            _retrieve_candidates,
+    if bool(settings.enable_hybrid_retrieval):
+        ranked, considered = _retrieve_hybrid_rrf_candidates(
             store,
             question,
             query_variants,
             candidate_k,
             access_filter,
         )
-        bm25_future = executor.submit(
-            _retrieve_bm25_candidates,
+    else:
+        ranked, considered = _retrieve_candidates(
             store,
             question,
-            bm25_k,
+            query_variants,
+            candidate_k,
             access_filter,
         )
-
-        ranked_vector, considered_vector = vector_future.result()
-        ranked_bm25, considered_bm25 = bm25_future.result()
-
-    merged_ranked: dict[tuple[str, int, str], RetrievedChunk] = {}
-    for item in ranked_vector + ranked_bm25:
-        key = _doc_key(item.document)
-        existing = merged_ranked.get(key)
-        if existing is None:
-            merged_ranked[key] = item
-            continue
-
-        vector_conf = max(existing.vector_confidence, item.vector_confidence)
-        lexical = max(existing.lexical_score, item.lexical_score)
-        bm25_score = max(existing.bm25_score, item.bm25_score)
-        merged_ranked[key] = RetrievedChunk(
-            document=existing.document,
-            vector_confidence=vector_conf,
-            lexical_score=lexical,
-            bm25_score=bm25_score,
-            final_score=_combine_score(vector_conf, lexical, bm25_score),
-        )
-
-    ranked = sorted(merged_ranked.values(), key=lambda item: item.final_score, reverse=True)
-    considered = considered_vector + considered_bm25
 
     fallback_applied = False
     top_conf = ranked[0].final_score if ranked else 0.0

@@ -180,6 +180,7 @@ class SourceReference(BaseModel):
     bm25_score: Optional[float] = Field(default=None, description="BM25-style score.")
     final_score: Optional[float] = Field(default=None, description="Final score after reranking or blending.")
     reranker_applied: Optional[bool] = Field(default=None, description="Whether neural reranking affected ranking.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Raw chunk metadata used for citation.")
 
 
 class RetrievalDiagnostics(BaseModel):

@@ -28,6 +28,8 @@ def _connect() -> Iterator[sqlite3.Connection]:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     try:
         _ensure_schema(conn)
         yield conn
@@ -227,6 +229,40 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS demo_sessions (
+            token TEXT PRIMARY KEY,
+            created_at INTEGER NOT NULL,
+            query_count INTEGER NOT NULL DEFAULT 0,
+            upload_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_demo_sessions_created_at ON demo_sessions(created_at)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vector_chunks (
+            embedding_model TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            docstore_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            file_hash TEXT NOT NULL DEFAULT '',
+            document_id TEXT NOT NULL DEFAULT '',
+            chunk_index INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (embedding_model, position)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_vector_chunks_docstore_id "
+        "ON vector_chunks(embedding_model, docstore_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_vector_chunks_file_hash "
+        "ON vector_chunks(embedding_model, file_hash)"
+    )
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -627,6 +663,178 @@ def list_users() -> list[dict[str, Any]]:
 
 def allowed_file_hashes_for_user(user: dict[str, Any]) -> list[str]:
     return [str(doc["file_hash"]) for doc in list_documents_for_user(user)]
+
+
+def create_demo_session(ttl_seconds: int = 86400) -> dict[str, Any]:
+    now = int(time.time())
+    ttl = max(60, int(ttl_seconds))
+    token = secrets.token_hex(32)
+    cutoff = now - ttl
+    with _connect() as conn:
+        conn.execute("DELETE FROM demo_sessions WHERE created_at <= ?", (cutoff,))
+        conn.execute(
+            """
+            INSERT INTO demo_sessions (token, created_at, query_count, upload_count)
+            VALUES (?, ?, 0, 0)
+            """,
+            (token, now),
+        )
+    return {
+        "token": token,
+        "created_at": now,
+        "expires_at": now + ttl,
+        "query_count": 0,
+        "upload_count": 0,
+    }
+
+
+def get_demo_session(token: str, ttl_seconds: int = 86400) -> dict[str, Any] | None:
+    normalized = str(token or "").strip()
+    if not normalized:
+        return None
+    now = int(time.time())
+    cutoff = now - max(60, int(ttl_seconds))
+    with _connect() as conn:
+        conn.execute("DELETE FROM demo_sessions WHERE created_at <= ?", (cutoff,))
+        row = conn.execute(
+            """
+            SELECT token, created_at, query_count, upload_count
+            FROM demo_sessions
+            WHERE token = ? AND created_at > ?
+            """,
+            (normalized, cutoff),
+        ).fetchone()
+    if row is None:
+        return None
+    item = dict(row)
+    item["expires_at"] = int(item["created_at"]) + max(60, int(ttl_seconds))
+    return item
+
+
+def check_demo_session_quota(
+    *,
+    token: str,
+    action: str,
+    limit: int,
+    ttl_seconds: int = 86400,
+) -> dict[str, Any]:
+    session = get_demo_session(token, ttl_seconds=ttl_seconds)
+    resolved_limit = max(1, int(limit))
+    field = "query_count" if action == "query" else "upload_count"
+    if session is None:
+        return {"allowed": False, "limit": resolved_limit, "remaining": 0, "reason": "invalid"}
+    count = int(session.get(field, 0) or 0)
+    return {
+        "allowed": count < resolved_limit,
+        "limit": resolved_limit,
+        "remaining": max(0, resolved_limit - count),
+        "reason": "quota" if count >= resolved_limit else "",
+    }
+
+
+def increment_demo_session_usage(
+    *,
+    token: str,
+    action: str,
+    limit: int,
+    ttl_seconds: int = 86400,
+) -> dict[str, Any]:
+    field = "query_count" if action == "query" else "upload_count"
+    resolved_limit = max(1, int(limit))
+    normalized = str(token or "").strip()
+    now = int(time.time())
+    cutoff = now - max(60, int(ttl_seconds))
+
+    with _connect() as conn:
+        conn.execute("DELETE FROM demo_sessions WHERE created_at <= ?", (cutoff,))
+        cursor = conn.execute(
+            f"""
+            UPDATE demo_sessions
+            SET {field} = {field} + 1
+            WHERE token = ?
+              AND created_at > ?
+              AND {field} < ?
+            """,
+            (normalized, cutoff, resolved_limit),
+        )
+        row = conn.execute(
+            """
+            SELECT token, created_at, query_count, upload_count
+            FROM demo_sessions
+            WHERE token = ?
+            """,
+            (normalized,),
+        ).fetchone()
+
+    if cursor.rowcount != 1 or row is None:
+        return {"allowed": False, "limit": resolved_limit, "remaining": 0}
+    count = int(dict(row).get(field, 0) or 0)
+    return {
+        "allowed": True,
+        "limit": resolved_limit,
+        "remaining": max(0, resolved_limit - count),
+    }
+
+
+def replace_vector_chunks(embedding_model: str, chunks: list[dict[str, Any]]) -> None:
+    normalized_model = str(embedding_model or "").strip()
+    with _connect() as conn:
+        conn.execute("DELETE FROM vector_chunks WHERE embedding_model = ?", (normalized_model,))
+        conn.executemany(
+            """
+            INSERT INTO vector_chunks (
+                embedding_model, position, docstore_id, content, metadata_json,
+                file_hash, document_id, chunk_index
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    normalized_model,
+                    int(item.get("position", 0) or 0),
+                    str(item.get("docstore_id", "")),
+                    str(item.get("content", "")),
+                    json.dumps(item.get("metadata", {}) or {}),
+                    str((item.get("metadata", {}) or {}).get("file_hash", "")),
+                    str((item.get("metadata", {}) or {}).get("document_id", "")),
+                    int((item.get("metadata", {}) or {}).get("chunk_index", 0) or 0),
+                )
+                for item in chunks
+                if str(item.get("docstore_id", "")).strip()
+            ],
+        )
+
+
+def list_vector_chunks(embedding_model: str) -> list[dict[str, Any]]:
+    normalized_model = str(embedding_model or "").strip()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT position, docstore_id, content, metadata_json
+            FROM vector_chunks
+            WHERE embedding_model = ?
+            ORDER BY position
+            """,
+            (normalized_model,),
+        ).fetchall()
+    chunks: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            metadata = json.loads(str(item.pop("metadata_json", "{}") or "{}"))
+        except json.JSONDecodeError:
+            metadata = {}
+        item["metadata"] = metadata if isinstance(metadata, dict) else {}
+        chunks.append(item)
+    return chunks
+
+
+def clear_vector_chunks(embedding_model: str | None = None) -> None:
+    with _connect() as conn:
+        if embedding_model is None:
+            conn.execute("DELETE FROM vector_chunks")
+        else:
+            conn.execute("DELETE FROM vector_chunks WHERE embedding_model = ?", (str(embedding_model),))
 
 
 def check_rate_limit(

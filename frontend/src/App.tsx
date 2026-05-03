@@ -31,15 +31,26 @@ const STARTER_PROMPTS = [
   'Where is the SLA escalation path documented?',
 ];
 
-function getDemoSessionId(): string {
+interface DemoSessionResponse {
+  token: string;
+  expires_at: number;
+}
+
+function getStoredDemoSessionId(): string {
   if (!PUBLIC_DEMO_MODE) return '';
-  const existing = window.localStorage.getItem(DEMO_SESSION_STORAGE_KEY);
+  return window.localStorage.getItem(DEMO_SESSION_STORAGE_KEY) || '';
+}
+
+async function ensureDemoSessionId(): Promise<string> {
+  const existing = getStoredDemoSessionId();
   if (existing) return existing;
-  const bytes = new Uint8Array(24);
-  window.crypto.getRandomValues(bytes);
-  const generated = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-  window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, generated);
-  return generated;
+  const response = await axios.post<DemoSessionResponse>(
+    `${API_BASE}/demo/session`,
+    undefined,
+    { headers: API_HEADERS }
+  );
+  window.localStorage.setItem(DEMO_SESSION_STORAGE_KEY, response.data.token);
+  return response.data.token;
 }
 
 interface Source {
@@ -291,8 +302,7 @@ function getStoredAuthToken(): string {
   return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
 }
 
-function buildApiHeaders(token: string): Record<string, string> {
-  const demoSessionId = getDemoSessionId();
+function buildApiHeaders(token: string, demoSessionId: string): Record<string, string> {
   return {
     ...API_HEADERS,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -401,6 +411,7 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [demoSessionId, setDemoSessionId] = useState(getStoredDemoSessionId);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const queryInputRef = useRef<HTMLTextAreaElement>(null);
@@ -408,8 +419,10 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const lastScrollTopRef = useRef(0);
-  const apiHeaders = React.useMemo(() => buildApiHeaders(authToken), [authToken]);
-  const canUseApi = Boolean(authStatus && (PUBLIC_DEMO_MODE || !authStatus.auth_enabled || authUser || API_KEY));
+  const apiHeaders = React.useMemo(() => buildApiHeaders(authToken, demoSessionId), [authToken, demoSessionId]);
+  const canUseApi = Boolean(
+    authStatus && ((PUBLIC_DEMO_MODE && demoSessionId) || !authStatus.auth_enabled || authUser || API_KEY)
+  );
 
   // Auto-scroll only when user is already near bottom.
   useEffect(() => {
@@ -467,6 +480,25 @@ function App() {
       }
     };
     void loadAuthStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!PUBLIC_DEMO_MODE) return;
+    let cancelled = false;
+    const loadDemoSession = async () => {
+      try {
+        const token = await ensureDemoSessionId();
+        if (!cancelled) setDemoSessionId(token);
+      } catch (error) {
+        console.warn('Failed to create demo session.', error);
+        window.localStorage.removeItem(DEMO_SESSION_STORAGE_KEY);
+        if (!cancelled) setDemoSessionId('');
+      }
+    };
+    void loadDemoSession();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

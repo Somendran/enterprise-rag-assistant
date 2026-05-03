@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import auth, upload, query, ops
+from app.api.security import demo_router
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -50,6 +51,7 @@ app.include_router(upload.router, tags=["Ingestion"])
 app.include_router(query.router, tags=["Retrieval & Generation"])
 app.include_router(ops.router, tags=["Ops"])
 app.include_router(auth.router)
+app.include_router(demo_router)
 
 
 # Health check

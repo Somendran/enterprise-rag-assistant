@@ -25,8 +25,9 @@ logger = get_logger(__name__)
 def chunk_structured_blocks(blocks: List[dict]) -> List[Document]:
     """Build structure-aware chunks from parsed blocks.
 
-    This keeps heading context, carries visual descriptions inline,
-    and preserves source block ids for traceability.
+    Docling has already recovered paragraph, heading, list, and table
+    boundaries, so use those boundaries directly and only split individual
+    oversized elements.
     """
     if not blocks:
         return []
@@ -41,94 +42,117 @@ def chunk_structured_blocks(blocks: List[dict]) -> List[Document]:
 
     max_chars = max(200, int(settings.chunk_size))
     chunks: list[Document] = []
-    section = "General"
+    section_title: str | None = None
+    pending_short: dict | None = None
 
-    buffer_lines: list[str] = []
-    buffer_ids: list[str] = []
-    buffer_block_types: set[str] = set()
-    buffer_has_visual = False
-    buffer_page: int = int(ordered[0].get("page", 1) or 1)
-    buffer_meta: dict = {}
-
-    def _flush_buffer() -> None:
-        nonlocal buffer_lines, buffer_ids, buffer_block_types, buffer_has_visual, buffer_page, buffer_meta
-        if not buffer_lines:
-            return
-
-        text = "\n\n".join(line for line in buffer_lines if line.strip()).strip()
-        text = _clean_text_for_indexing(text)
-        if not text or not _has_enough_signal(text):
-            buffer_lines = []
-            buffer_ids = []
-            buffer_block_types = set()
-            buffer_has_visual = False
-            return
-
-        metadata = {
-            "source": buffer_meta.get("source", "unknown"),
-            "page": int(buffer_page or 1),
-            "section": section,
-            "block_type": next(iter(buffer_block_types)) if len(buffer_block_types) == 1 else "mixed",
-            "has_visual": bool(buffer_has_visual),
-            "source_block_ids": list(buffer_ids),
-            "file_hash": buffer_meta.get("file_hash", ""),
-            "document_id": buffer_meta.get("document_id", ""),
-            "uploaded_at": buffer_meta.get("uploaded_at", ""),
+    def _base_metadata(block: dict, element_type: str, source_ids: list[str]) -> dict:
+        return {
+            "source": block.get("source", "unknown"),
+            "filename": block.get("source", "unknown"),
+            "page": int(block.get("page", 0) or 0),
+            "section": section_title or "",
+            "section_title": section_title,
+            "element_type": element_type,
+            "block_type": element_type,
+            "source_block_ids": source_ids,
+            "file_hash": block.get("file_hash", ""),
+            "document_id": block.get("document_id", ""),
+            "doc_id": block.get("document_id", ""),
+            "uploaded_at": block.get("uploaded_at", ""),
+            "has_visual": bool(block.get("has_visual", False)),
         }
-        chunks.append(Document(page_content=text, metadata=metadata))
 
-        buffer_lines = []
-        buffer_ids = []
-        buffer_block_types = set()
-        buffer_has_visual = False
+    def _append_text_chunks(text: str, block: dict, element_type: str, source_ids: list[str]) -> None:
+        cleaned = _clean_text_for_indexing(text)
+        if not cleaned:
+            return
+
+        metadata = _base_metadata(block, element_type, source_ids)
+        if len(cleaned) <= max_chars:
+            chunks.append(Document(page_content=cleaned, metadata=metadata))
+            return
+
+        splitter = _recursive_splitter()
+        for part in splitter.split_text(cleaned):
+            part = _clean_text_for_indexing(part)
+            if part:
+                chunks.append(Document(page_content=part, metadata=dict(metadata)))
+
+    def _append_table_chunks(text: str, block: dict, source_ids: list[str]) -> None:
+        cleaned = _clean_text_for_indexing(text)
+        if not cleaned:
+            return
+
+        metadata = _base_metadata(block, "table", source_ids)
+        table_limit = max_chars * 2
+        if len(cleaned) <= table_limit:
+            chunks.append(Document(page_content=cleaned, metadata=metadata))
+            return
+
+        row_buffer: list[str] = []
+        for row in cleaned.splitlines():
+            candidate = "\n".join(row_buffer + [row]).strip()
+            if row_buffer and len(candidate) > table_limit:
+                chunks.append(Document(page_content="\n".join(row_buffer).strip(), metadata=dict(metadata)))
+                row_buffer = [row]
+            else:
+                row_buffer.append(row)
+        if row_buffer:
+            chunks.append(Document(page_content="\n".join(row_buffer).strip(), metadata=dict(metadata)))
+
+    def _emit_pending_short() -> None:
+        nonlocal pending_short
+        if pending_short is None:
+            return
+        _append_text_chunks(
+            str(pending_short.get("content", "")),
+            pending_short,
+            str(pending_short.get("type", "paragraph")),
+            [str(pending_short.get("id", "")).strip()] if str(pending_short.get("id", "")).strip() else [],
+        )
+        pending_short = None
 
     for block in ordered:
-        block_type = str(block.get("type", "paragraph")).lower().strip()
+        block_type = str(block.get("type", "paragraph")).lower().strip() or "paragraph"
+        if block_type not in {"heading", "paragraph", "table", "list"}:
+            block_type = "paragraph"
+
         block_content = str(block.get("content", "")).strip()
         block_visual = str(block.get("visual_description", "")).strip()
-        block_page = int(block.get("page", buffer_page) or buffer_page)
-
-        if block_type == "heading" and block_content:
-            _flush_buffer()
-            section = block_content
-            buffer_page = block_page
-            buffer_meta = block
-            continue
-
-        parts: list[str] = []
-        if block_visual:
-            parts.append(block_visual)
-            buffer_has_visual = True
-        if block_content:
-            parts.append(block_content)
-        if not parts:
-            continue
-
+        parts = [part for part in [block_visual, block_content] if part]
         block_text = "\n\n".join(parts).strip()
         if not block_text:
             continue
 
-        candidate_text = "\n\n".join(buffer_lines + [block_text]).strip()
-        if buffer_lines and len(candidate_text) > max_chars:
-            _flush_buffer()
-            buffer_page = block_page
-            buffer_meta = block
-
-        if not buffer_lines:
-            buffer_page = block_page
-            buffer_meta = block
-
-        prefix = f"Section: {section}\n\n" if not buffer_lines else ""
-        buffer_lines.append((prefix + block_text).strip())
         block_id = str(block.get("id", "")).strip()
-        if block_id:
-            buffer_ids.append(block_id)
-        buffer_block_types.add(block_type or "paragraph")
+        source_ids = [block_id] if block_id else []
 
-        if bool(block.get("has_visual", False)):
-            buffer_has_visual = True
+        if block_type == "heading":
+            _emit_pending_short()
+            section_title = block_content or section_title
+            pending_short = {**block, "content": block_text, "type": "heading"}
+            continue
 
-    _flush_buffer()
+        if block_type == "table":
+            _emit_pending_short()
+            _append_table_chunks(block_text, block, source_ids)
+            continue
+
+        if pending_short is not None:
+            pending_id = str(pending_short.get("id", "")).strip()
+            merged = f"{pending_short.get('content', '')}\n\n{block_text}".strip()
+            merged_ids = ([pending_id] if pending_id else []) + source_ids
+            _append_text_chunks(merged, block, block_type, merged_ids)
+            pending_short = None
+            continue
+
+        if len(block_text) < 100:
+            pending_short = {**block, "content": block_text, "type": block_type}
+            continue
+
+        _append_text_chunks(block_text, block, block_type, source_ids)
+
+    _emit_pending_short()
     if settings.enable_metadata_enrichment:
         return enrich_chunk_metadata(chunks)
     return chunks
@@ -176,6 +200,15 @@ def _has_enough_signal(text: str) -> bool:
     return len(letters) >= 8
 
 
+def _recursive_splitter() -> RecursiveCharacterTextSplitter:
+    return RecursiveCharacterTextSplitter(
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+        length_function=len,
+    )
+
+
 def split_documents(documents: List[Document]) -> List[Document]:
     """
     Split a list of Documents into overlapping text chunks.
@@ -190,13 +223,7 @@ def split_documents(documents: List[Document]) -> List[Document]:
         A flat list of smaller Document chunks, each inheriting the
         original metadata (source filename, page number).
     """
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.chunk_size,           # target character count per chunk
-        chunk_overlap=settings.chunk_overlap,     # overlap to avoid cut-off context
-        separators=["\n\n", "\n", ". ", " ", ""], # ordered from coarsest to finest
-        length_function=len,
-    )
-
+    splitter = _recursive_splitter()
     chunks = splitter.split_documents(documents)
 
     # Preserve layout-derived context so retrieval can target the right section/table.
@@ -214,6 +241,10 @@ def split_documents(documents: List[Document]) -> List[Document]:
 
         has_tables = bool(chunk.metadata.get("has_tables", False))
         chunk.metadata["chunk_has_tables"] = has_tables
+        chunk.metadata.setdefault("filename", chunk.metadata.get("source", "unknown"))
+        chunk.metadata.setdefault("doc_id", chunk.metadata.get("document_id", ""))
+        chunk.metadata.setdefault("section_title", chunk.metadata.get("section_hint") or None)
+        chunk.metadata.setdefault("element_type", "page")
 
     chunks = [chunk for chunk in chunks if chunk.page_content.strip() and _has_enough_signal(chunk.page_content)]
 

@@ -275,7 +275,12 @@ def _extract_sources(
                     relevance_score=round(float(chunk.final_score), 4),
                     snippet=snippet or None,
                     section=(
-                        str(chunk.document.metadata.get("section") or chunk.document.metadata.get("section_hint") or "")
+                        str(
+                            chunk.document.metadata.get("section_title")
+                            or chunk.document.metadata.get("section")
+                            or chunk.document.metadata.get("section_hint")
+                            or ""
+                        )
                         or None
                     ),
                     vector_score=round(float(chunk.vector_confidence), 4),
@@ -283,6 +288,7 @@ def _extract_sources(
                     bm25_score=round(float(chunk.bm25_score), 4),
                     final_score=round(float(chunk.final_score), 4),
                     reranker_applied=reranker_applied,
+                    metadata=dict(chunk.document.metadata or {}),
                 )
             )
     return sources

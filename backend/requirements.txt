@@ -15,3 +15,4 @@ FlagEmbedding==1.2.11
 peft==0.17.1
 openai>=1.99.0,<2.0.0
 docling>=2.0.0
+rank_bm25>=0.2.2,<0.3.0

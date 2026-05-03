@@ -28,17 +28,18 @@ import hashlib
 import re
 import threading
 import math
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional, Any
-from concurrent.futures import ThreadPoolExecutor
 
+import faiss
 from langchain_core.embeddings import Embeddings
 from langchain.schema import Document
+from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_community.vectorstores import FAISS
 
 from app.services.embedding_service import (
     get_embedding_model,
-    is_local_embedding_backend,
     embedding_backend_name,
     resolve_embedding_model_name,
 )
@@ -53,6 +54,7 @@ logger = get_logger(__name__)
 _store: Optional[FAISS] = None
 _META_FILENAME = "index_meta.json"
 _DOC_REGISTRY_FILENAME = "document_registry.json"
+_FAISS_INDEX_FILENAME = "index.index"
 _write_lock = threading.Lock()
 _migration_checked = False
 
@@ -131,6 +133,11 @@ def _meta_path(index_path: str) -> Path:
 def _doc_registry_path(index_path: str) -> Path:
     """Return document registry path used for duplicate detection."""
     return Path(index_path) / _DOC_REGISTRY_FILENAME
+
+
+def _faiss_index_file(index_path: str) -> Path:
+    """Return the raw FAISS index file path."""
+    return Path(index_path) / _FAISS_INDEX_FILENAME
 
 
 def _read_index_meta(index_path: str) -> Optional[dict[str, Any]]:
@@ -241,6 +248,180 @@ def _reset_persisted_index(index_path: str) -> None:
         path.unlink(missing_ok=True)
 
 
+def _create_empty_store(embeddings: Embeddings, dimension: Optional[int] = None) -> FAISS:
+    """Create an empty LangChain FAISS wrapper without using pickle state."""
+    resolved_dimension = dimension
+    if resolved_dimension is None or resolved_dimension <= 0:
+        try:
+            resolved_dimension = len(embeddings.embed_query("dimension probe"))
+        except Exception as exc:
+            logger.warning("Could not resolve embedding dimension for empty FAISS index: %s", exc)
+            resolved_dimension = 1
+    index = faiss.IndexFlatL2(int(resolved_dimension))
+    return FAISS(embeddings, index, InMemoryDocstore({}), {})
+
+
+def _persist_raw_faiss_index(store: FAISS, index_path: str) -> None:
+    """Persist only the raw FAISS index and non-pickle metadata."""
+    path = Path(index_path)
+    path.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(store.index, str(_faiss_index_file(index_path)))
+
+
+def _persist_docstore_chunks(store: FAISS) -> None:
+    """Persist LangChain docstore contents in SQLite for safe reconstruction."""
+    docstore = getattr(store, "docstore", None)
+    doc_dict = getattr(docstore, "_dict", {}) if docstore is not None else {}
+    index_to_docstore_id = getattr(store, "index_to_docstore_id", {}) or {}
+    rows: list[dict[str, Any]] = []
+    for position, docstore_id in sorted(index_to_docstore_id.items(), key=lambda item: int(item[0])):
+        doc = doc_dict.get(docstore_id)
+        if not isinstance(doc, Document):
+            continue
+        rows.append(
+            {
+                "position": int(position),
+                "docstore_id": str(docstore_id),
+                "content": str(doc.page_content or ""),
+                "metadata": dict(doc.metadata or {}),
+            }
+        )
+    metadata_store.replace_vector_chunks(resolve_embedding_model_name(), rows)
+
+
+def _persist_store(store: FAISS, index_path: str) -> None:
+    _persist_raw_faiss_index(store, index_path)
+    _persist_docstore_chunks(store)
+    _write_index_meta(index_path, _get_index_dimension(store))
+
+
+def _load_store_from_raw_index(index_path: str, embeddings: Embeddings) -> FAISS:
+    """Load a raw FAISS index and rebuild LangChain state from SQLite."""
+    index_file = _faiss_index_file(index_path)
+    if not index_file.exists():
+        logger.info("No raw FAISS index found. Initializing an empty index.")
+        return _create_empty_store(embeddings, _resolve_current_embedding_dimension(index_path, embeddings))
+
+    index = faiss.read_index(str(index_file))
+    rows = metadata_store.list_vector_chunks(resolve_embedding_model_name())
+    docstore: dict[str, Document] = {}
+    index_to_docstore_id: dict[int, str] = {}
+
+    for row in rows:
+        position = int(row.get("position", 0) or 0)
+        docstore_id = str(row.get("docstore_id", ""))
+        if not docstore_id:
+            continue
+        docstore[docstore_id] = Document(
+            page_content=str(row.get("content", "")),
+            metadata=dict(row.get("metadata", {}) or {}),
+        )
+        index_to_docstore_id[position] = docstore_id
+
+    if int(getattr(index, "ntotal", 0) or 0) != len(index_to_docstore_id):
+        logger.warning(
+            "FAISS index/docstore mismatch detected. Resetting unsafe persisted index. index_vectors=%s docstore_rows=%s",
+            int(getattr(index, "ntotal", 0) or 0),
+            len(index_to_docstore_id),
+        )
+        _reset_persisted_index(index_path)
+        metadata_store.clear_vector_chunks(resolve_embedding_model_name())
+        return _create_empty_store(embeddings, _resolve_current_embedding_dimension(index_path, embeddings))
+
+    return FAISS(embeddings, index, InMemoryDocstore(docstore), index_to_docstore_id)
+
+
+def _normalized_chunk_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").lower().strip())
+
+
+def _near_duplicate_text(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if not left or not right:
+        return False
+    longer = max(len(left), len(right))
+    shorter = min(len(left), len(right))
+    if longer == 0 or (longer - shorter) / longer > 0.10:
+        return False
+    return SequenceMatcher(None, left, right).ratio() > 0.95
+
+
+def _document_group_key(doc: Document) -> str:
+    metadata = getattr(doc, "metadata", {}) or {}
+    return (
+        str(metadata.get("document_id") or "")
+        or str(metadata.get("doc_id") or "")
+        or str(metadata.get("file_hash") or "")
+        or str(metadata.get("source") or metadata.get("filename") or "unknown")
+    )
+
+
+def _prepare_chunks_for_embedding(chunks: List[Document]) -> List[Document]:
+    """Apply chunk metadata normalization, tiny-chunk filtering, and per-document dedupe.
+
+    Documents indexed before the chunking overhaul should be reindexed via the
+    existing knowledge-base reindex endpoint to benefit from this metadata and
+    chunk quality policy. That endpoint calls the full ingestion pipeline, so it
+    reaches this function before vectors are persisted.
+    """
+    grouped: dict[str, list[Document]] = {}
+    for chunk in chunks:
+        text = str(getattr(chunk, "page_content", "") or "").strip()
+        if len(text) < 50:
+            continue
+        grouped.setdefault(_document_group_key(chunk), []).append(chunk)
+
+    filtered: list[Document] = []
+    for group_key, group_chunks in grouped.items():
+        seen_normalized: list[str] = []
+        kept: list[Document] = []
+        for chunk in group_chunks:
+            normalized = _normalized_chunk_text(chunk.page_content)
+            if any(_near_duplicate_text(normalized, existing) for existing in seen_normalized):
+                continue
+            seen_normalized.append(normalized)
+            kept.append(chunk)
+
+        if len(kept) < 3:
+            logger.warning(
+                "Document produced fewer than 3 chunks after filtering | document=%s chunks=%d",
+                group_key,
+                len(kept),
+            )
+
+        total_chunks = len(kept)
+        for idx, chunk in enumerate(kept):
+            metadata = dict(getattr(chunk, "metadata", {}) or {})
+            filename = str(metadata.get("filename") or metadata.get("source") or "unknown")
+            document_id = str(metadata.get("document_id") or metadata.get("doc_id") or "")
+            section_title = metadata.get("section_title")
+            if section_title is None:
+                section_title = metadata.get("section") or metadata.get("section_hint")
+            element_type = metadata.get("element_type")
+            if element_type is None:
+                element_type = metadata.get("block_type")
+
+            metadata.update(
+                {
+                    "doc_id": document_id,
+                    "filename": filename,
+                    "source": str(metadata.get("source") or filename),
+                    "page": int(metadata.get("page", 0) or 0),
+                    "section_title": str(section_title).strip() if section_title else None,
+                    "element_type": str(element_type).strip() if element_type else None,
+                    "chunk_index": idx,
+                    "total_chunks": total_chunks,
+                }
+            )
+            if metadata["section_title"] and not metadata.get("section"):
+                metadata["section"] = metadata["section_title"]
+            chunk.metadata = metadata
+            filtered.append(chunk)
+
+    return filtered
+
+
 def is_document_indexed(file_hash: str) -> bool:
     """Return True when the same file hash has already been ingested."""
     _migrate_json_registry_if_needed()
@@ -345,8 +526,7 @@ def delete_indexed_document(file_hash: str) -> dict[str, Any]:
                     raise RuntimeError("The active FAISS store does not support document deletion.")
                 delete_fn(ids=ids_to_delete)
                 chunks_deleted = len(ids_to_delete)
-                store.save_local(index_path)
-                _write_index_meta(index_path, _get_index_dimension(store))
+                _persist_store(store, index_path)
 
         metadata_store.delete_document(file_hash)
 
@@ -450,13 +630,9 @@ def get_or_create_store() -> FAISS:
     index_path = _index_path()
     embeddings = get_embedding_model()
 
-    if Path(index_path).exists():
+    if _faiss_index_file(index_path).exists():
         logger.info(f"Loading existing FAISS index from: {index_path}")
-        _store = FAISS.load_local(
-            index_path,
-            embeddings,
-            allow_dangerous_deserialization=True,  # safe for local use
-        )
+        _store = _load_store_from_raw_index(index_path, embeddings)
 
         existing_dim = _get_index_dimension(_store)
         current_dim = _resolve_current_embedding_dimension(index_path, embeddings)
@@ -469,9 +645,11 @@ def get_or_create_store() -> FAISS:
             logger.warning("FAISS index dimension mismatch detected. Resetting index.")
             _store = None
             _reset_persisted_index(index_path)
+            metadata_store.clear_vector_chunks(resolve_embedding_model_name())
+            _store = _create_empty_store(embeddings, current_dim)
     else:
-        logger.info("No existing FAISS index found. A new one will be created on first upload.")
-        _store = None  # remains None until the first add_documents() call
+        logger.info("No existing FAISS index found. Initializing an empty index.")
+        _store = _create_empty_store(embeddings, _resolve_current_embedding_dimension(index_path, embeddings))
 
     return _store
 
@@ -493,13 +671,17 @@ def add_documents(chunks: List[Document]) -> FAISS:
     global _store
 
     with _write_lock:
+        prepared_chunks = _prepare_chunks_for_embedding(chunks)
+        chunks[:] = prepared_chunks
+        if not prepared_chunks:
+            raise RuntimeError("No chunks remain after chunk quality filtering.")
+        chunks = prepared_chunks
+
         add_documents_start = time.perf_counter()
         embeddings = get_embedding_model()
         index_path = _index_path()
         batch_size = max(1, settings.embedding_batch_size)
-        parallel_workers = max(1, settings.embedding_parallel_workers)
         backend_name = embedding_backend_name(embeddings)
-        is_local_backend = is_local_embedding_backend(embeddings)
 
         # Ensure the parent directory exists
         Path(index_path).parent.mkdir(parents=True, exist_ok=True)
@@ -510,70 +692,22 @@ def add_documents(chunks: List[Document]) -> FAISS:
         total_batches = math.ceil(total_chunks / batch_size) if total_chunks else 0
 
         logger.info(
-            "Embedding start | backend=%s total_chunks=%d batch_size=%d total_batches=%d parallel_workers=%d",
+            "Embedding start | backend=%s total_chunks=%d batch_size=%d total_batches=%d",
             backend_name,
             total_chunks,
             batch_size,
             total_batches,
-            parallel_workers,
         )
 
-        vectors: list[list[float]] = []
-        batch_inputs = [texts[start : start + batch_size] for start in range(0, total_chunks, batch_size)]
         embedding_start = time.perf_counter()
-
-        # Safe default: keep deterministic sequential execution for local backends.
-        # Optional parallel mode is allowed only for non-local backends to avoid
-        # thread-safety issues in local model runtimes.
-        if parallel_workers > 1 and not is_local_backend:
-            ordered_vectors: list[Optional[list[list[float]]]] = [None] * len(batch_inputs)
-
-            def _embed_batch(i: int, batch_texts: list[str]) -> tuple[int, list[list[float]], float]:
-                t0 = time.perf_counter()
-                result = embeddings.embed_documents(batch_texts)
-                elapsed_s = time.perf_counter() - t0
-                return i, result, elapsed_s
-
-            with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
-                futures = [
-                    executor.submit(_embed_batch, i, batch_texts)
-                    for i, batch_texts in enumerate(batch_inputs)
-                ]
-                for future in futures:
-                    i, result, elapsed_s = future.result()
-                    ordered_vectors[i] = result
-                    logger.info(
-                        "Embedding batch %d/%d completed in %.3fs (items=%d)",
-                        i + 1,
-                        total_batches,
-                        elapsed_s,
-                        len(batch_inputs[i]),
-                    )
-
-            for i, maybe_vectors in enumerate(ordered_vectors):
-                if maybe_vectors is None:
-                    raise RuntimeError(f"Missing embedding results for batch {i + 1}/{total_batches}")
-                vectors.extend(maybe_vectors)
+        embed_batch = getattr(embeddings, "embed_batch", None)
+        if callable(embed_batch):
+            vectors = embed_batch(texts, batch_size=batch_size)
         else:
-            if parallel_workers > 1 and is_local_backend:
-                logger.info(
-                    "Parallel embedding requested (%d workers) but backend=%s is kept sequential for safety.",
-                    parallel_workers,
-                    backend_name,
-                )
+            vectors = embeddings.embed_documents(texts)
 
-            for i, batch_texts in enumerate(batch_inputs, start=1):
-                batch_start = time.perf_counter()
-                batch_vectors = embeddings.embed_documents(batch_texts)
-                vectors.extend(batch_vectors)
-                batch_elapsed = time.perf_counter() - batch_start
-                logger.info(
-                    "Embedding batch %d/%d completed in %.3fs (items=%d)",
-                    i,
-                    total_batches,
-                    batch_elapsed,
-                    len(batch_texts),
-                )
+        if len(vectors) != len(texts):
+            raise RuntimeError(f"Embedding size mismatch: expected {len(texts)}, got {len(vectors)}")
 
         embedding_elapsed = time.perf_counter() - embedding_start
         logger.info(
@@ -591,7 +725,7 @@ def add_documents(chunks: List[Document]) -> FAISS:
 
         if _store is None:
             logger.info(f"Creating new FAISS index with {len(chunks)} chunk(s).")
-            _store = FAISS.from_embeddings(text_embeddings, embeddings, metadatas=metadatas)
+            _store = _create_empty_store(embeddings, new_dim)
         else:
             existing_dim = _get_index_dimension(_store)
             logger.info("FAISS merge pre-check dimensions | existing=%s new=%s", existing_dim, new_dim)
@@ -600,30 +734,15 @@ def add_documents(chunks: List[Document]) -> FAISS:
                 logger.warning("FAISS index dimension mismatch detected. Resetting index.")
                 _store = None
                 _reset_persisted_index(index_path)
-                _store = FAISS.from_embeddings(text_embeddings, embeddings, metadatas=metadatas)
-            else:
-                logger.info(f"Merging {len(chunks)} new chunk(s) into existing FAISS index.")
-                new_store = FAISS.from_embeddings(text_embeddings, embeddings, metadatas=metadatas)
-                try:
-                    _store.merge_from(new_store)
-                except Exception as exc:
-                    # Final safeguard: if FAISS still reports incompatible indexes,
-                    # reset and rebuild with the active embedding dimension.
-                    if "other->d == d" in str(exc) or "check_compatible_for_merge" in str(exc):
-                        logger.warning(
-                            "FAISS index dimension mismatch detected during merge. "
-                            "Resetting index. Error: %s",
-                            exc,
-                        )
-                        _store = None
-                        _reset_persisted_index(index_path)
-                        _store = FAISS.from_embeddings(text_embeddings, embeddings, metadatas=metadatas)
-                    else:
-                        raise
+                metadata_store.clear_vector_chunks(resolve_embedding_model_name())
+                _store = _create_empty_store(embeddings, new_dim)
+
+        if text_embeddings:
+            logger.info("Adding %d embedded chunk(s) to FAISS index.", len(chunks))
+            _store.add_embeddings(text_embeddings, metadatas=metadatas)
 
         # Persist after every successful write
-        _store.save_local(index_path)
-        _write_index_meta(index_path, _get_index_dimension(_store))
+        _persist_store(_store, index_path)
         faiss_elapsed = time.perf_counter() - faiss_start
         total_elapsed = time.perf_counter() - add_documents_start
         logger.info(
@@ -653,13 +772,13 @@ def get_knowledge_base_version() -> str:
     The value changes whenever persisted index metadata or registry file mtime changes.
     """
     index_path = Path(_index_path())
-    if not index_path.exists():
+    index_file = _faiss_index_file(str(index_path))
+    if not index_file.exists():
         return "empty"
 
     meta_mtime = _meta_path(str(index_path)).stat().st_mtime if _meta_path(str(index_path)).exists() else 0
-    registry_mtime = _doc_registry_path(str(index_path)).stat().st_mtime if _doc_registry_path(str(index_path)).exists() else 0
-    index_mtime = index_path.stat().st_mtime
-    return f"{resolve_embedding_model_name()}:{int(max(meta_mtime, registry_mtime, index_mtime))}"
+    index_mtime = index_file.stat().st_mtime
+    return f"{resolve_embedding_model_name()}:{int(max(meta_mtime, index_mtime))}"
 
 
 def reset_vector_store() -> bool:
@@ -677,6 +796,7 @@ def reset_vector_store() -> bool:
         _store = None
         _reset_persisted_index(index_path)
         metadata_store.clear_documents()
+        metadata_store.clear_vector_chunks()
         return existed
 
 

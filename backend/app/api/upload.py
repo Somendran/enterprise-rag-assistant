@@ -1,6 +1,7 @@
 """Upload and knowledge-base management endpoints."""
 
 import os
+import re
 import time
 import shutil
 import hashlib
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile, File, status
 
-from app.api.security import AuthContext, require_admin, require_user
+from app.api.security import AuthContext, DEMO_SESSION_TTL_SECONDS, require_admin, require_user
 from app.api.upload_validation import count_pdf_pages, safe_pdf_filename, validate_pdf_upload
 from app.services.document_loader import load_pdf
 from app.services.text_splitter import split_documents, chunk_structured_blocks
@@ -74,11 +75,19 @@ def _enforce_demo_rate_limit(current_user: AuthContext, request: Request, action
 
     session_limit = settings.demo_uploads_per_hour if action == "upload" else settings.demo_queries_per_hour
     ip_limit = settings.demo_uploads_per_hour_ip if action == "upload" else settings.demo_queries_per_hour_ip
-    session_result = metadata_store.check_rate_limit(
-        key=current_user.id,
-        action=action,
-        limit=session_limit,
-    )
+    if hasattr(metadata_store, "check_demo_session_quota"):
+        session_result = metadata_store.check_demo_session_quota(
+            token=current_user.demo_token,
+            action=action,
+            limit=session_limit,
+            ttl_seconds=DEMO_SESSION_TTL_SECONDS,
+        )
+    else:
+        session_result = metadata_store.check_rate_limit(
+            key=current_user.id,
+            action=action,
+            limit=session_limit,
+        )
     ip_result = metadata_store.check_rate_limit(
         key=f"ip:{_client_ip(request)}",
         action=action,
@@ -112,6 +121,22 @@ def _assert_demo_upload_budget(current_user: AuthContext, request: Request, file
     _enforce_demo_rate_limit(current_user, request, "upload")
 
 
+def _record_demo_upload_success(current_user: AuthContext) -> None:
+    if not current_user.is_demo or not hasattr(metadata_store, "increment_demo_session_usage"):
+        return
+    result = metadata_store.increment_demo_session_usage(
+        token=current_user.demo_token,
+        action="upload",
+        limit=settings.demo_uploads_per_hour,
+        ttl_seconds=DEMO_SESSION_TTL_SECONDS,
+    )
+    if not result["allowed"]:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Public demo upload limit reached. Please try again later.",
+        )
+
+
 def _demo_expiry(current_user: AuthContext) -> int:
     if not current_user.is_demo:
         return 0
@@ -125,8 +150,27 @@ def _demo_upload_limit_bytes(current_user: AuthContext) -> tuple[int, int]:
     return settings.max_upload_size_bytes, settings.max_upload_size_mb
 
 
+def safe_filename(name: str) -> str:
+    raw_name = str(name or "").replace("\x00", "")
+    raw_name = raw_name.encode("ascii", "ignore").decode("ascii")
+    sanitized = Path(raw_name).name
+    sanitized = re.sub(r"[^\w\.\-]", "_", sanitized)
+    return sanitized or "upload"
+
+
+def _upload_dir() -> Path:
+    return Path(settings.upload_dir).resolve()
+
+
 def _stored_upload_path(file_hash: str, filename: str) -> Path:
-    return Path(settings.upload_dir) / f"{file_hash[:12]}_{filename}"
+    upload_dir = _upload_dir()
+    safe_name = safe_filename(f"{file_hash[:12]}_{filename}")
+    dest = (upload_dir / safe_name).resolve()
+    upload_dir_str = str(upload_dir)
+    if dest != upload_dir and not str(dest).startswith(upload_dir_str + os.sep):
+        logger.warning("Path traversal detected for uploaded filename: %s", filename)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid upload filename.")
+    return dest
 
 
 def _find_stored_upload(file_hash: str, filename: str, upload_path: str = "") -> Path | None:
@@ -784,6 +828,7 @@ async def upload_document(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No files received. Please upload at least one .pdf file.",
         )
+    _assert_demo_upload_budget(current_user, request, files)
 
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -862,6 +907,8 @@ async def upload_document(
                     "file_path": str(file_path),
                 }
             )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error("Failed to save file '%s': %s", file.filename, e)
             failed_results.append(
@@ -884,6 +931,7 @@ async def upload_document(
     results = failed_results + response.files
     processed_files = sum(1 for item in results if item.status in {"success", "duplicate"})
     total_chunks_indexed = sum(item.chunks_indexed for item in results if item.status == "success")
+    _record_demo_upload_success(current_user)
     logger.info(
         "Batch ingest completed | total_files=%d processed_files=%d total_chunks_indexed=%d",
         len(files),
@@ -933,7 +981,6 @@ async def upload_document_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No files received. Please upload at least one .pdf file.",
         )
-    _assert_demo_upload_budget(current_user, request, files)
     _assert_demo_upload_budget(current_user, request, files)
 
     upload_dir = Path(settings.upload_dir)
@@ -1013,6 +1060,8 @@ async def upload_document_job(
                     "file_path": str(file_path),
                 }
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             early_results.append(
                 UploadItemResult(
@@ -1089,6 +1138,7 @@ async def upload_document_job(
 
     threading.Thread(target=_worker, daemon=True).start()
     payload = metadata_store.get_ingestion_job(job_id) or {}
+    _record_demo_upload_success(current_user)
     return IngestionJobResponse(
         job_id=job_id,
         status=str(payload.get("status", "queued")),

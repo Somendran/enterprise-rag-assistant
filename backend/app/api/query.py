@@ -7,7 +7,7 @@ import threading
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
-from app.api.security import AuthContext, require_user
+from app.api.security import AuthContext, DEMO_SESSION_TTL_SECONDS, require_user
 from app.services import metadata_store
 from app.services.rag_pipeline import run_rag_pipeline
 from app.services.vector_store import cleanup_expired_demo_documents
@@ -30,17 +30,41 @@ def _client_ip(request: Request) -> str:
 def _enforce_demo_query_rate_limit(current_user: AuthContext, request: Request) -> None:
     if not current_user.is_demo:
         return
-    session_result = metadata_store.check_rate_limit(
-        key=current_user.id,
-        action="query",
-        limit=settings.demo_queries_per_hour,
-    )
+    if hasattr(metadata_store, "check_demo_session_quota"):
+        session_result = metadata_store.check_demo_session_quota(
+            token=current_user.demo_token,
+            action="query",
+            limit=settings.demo_queries_per_hour,
+            ttl_seconds=DEMO_SESSION_TTL_SECONDS,
+        )
+    else:
+        session_result = metadata_store.check_rate_limit(
+            key=current_user.id,
+            action="query",
+            limit=settings.demo_queries_per_hour,
+        )
     ip_result = metadata_store.check_rate_limit(
         key=f"ip:{_client_ip(request)}",
         action="query",
         limit=settings.demo_queries_per_hour_ip,
     )
     if not session_result["allowed"] or not ip_result["allowed"]:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Public demo query limit reached. Please try again later.",
+        )
+
+
+def _record_demo_query_success(current_user: AuthContext) -> None:
+    if not current_user.is_demo or not hasattr(metadata_store, "increment_demo_session_usage"):
+        return
+    result = metadata_store.increment_demo_session_usage(
+        token=current_user.demo_token,
+        action="query",
+        limit=settings.demo_queries_per_hour,
+        ttl_seconds=DEMO_SESSION_TTL_SECONDS,
+    )
+    if not result["allowed"]:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Public demo query limit reached. Please try again later.",
@@ -84,6 +108,7 @@ async def query_knowledge_base(
             allowed_file_hashes=allowed_file_hashes,
             access_scope=current_user.id,
         )
+        _record_demo_query_success(current_user)
     except RuntimeError as e:
         message = str(e)
         lowered = message.lower()
@@ -185,6 +210,7 @@ async def query_knowledge_base_stream(
                 allowed_file_hashes=allowed_file_hashes,
                 access_scope=current_user.id,
             )
+            _record_demo_query_success(current_user)
             elapsed = time.perf_counter() - start_time
             logger.info(
                 "Streaming query answered in %.2fs | confidence=%.3f level=%s",

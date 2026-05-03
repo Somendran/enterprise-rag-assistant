@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 6
     # Candidate chunks to collect before rerank-lite trims to retrieval_top_k.
     retrieval_candidate_k: int = 10
+    enable_hybrid_retrieval: bool = True
     bm25_top_k: int = 30
     bm25_weight: float = 0.25
     # Adaptive fast mode for simple questions.
@@ -129,14 +130,14 @@ class Settings(BaseSettings):
     # Embedding ingestion throughput
     # Number of chunks per embedding call during upload ingestion.
     # Tune batch size for the selected sentence-transformers device.
-    embedding_batch_size: int = 64
+    embedding_batch_size: int = 100
     # Optional embedding parallelism. Keep at 1 unless backend is confirmed
     # thread-safe for concurrent embed_documents calls.
     embedding_parallel_workers: int = 1
 
     # Text splitting
-    chunk_size: int = 700
-    chunk_overlap: int = 100
+    chunk_size: int = 1600
+    chunk_overlap: int = 200
 
     # Retrieval behavior toggles
     enable_retrieval_fallback: bool = True

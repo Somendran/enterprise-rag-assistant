@@ -5,10 +5,13 @@ from dataclasses import dataclass
 import hashlib
 import re
 
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
 from app.config import settings
 from app.services import metadata_store
+
+DEMO_SESSION_TTL_SECONDS = 24 * 3600
+DEMO_TOKEN_PATTERN = re.compile(r"[A-Fa-f0-9]{64}")
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,7 @@ class AuthContext:
     role: str
     is_system_admin: bool = False
     is_demo: bool = False
+    demo_token: str = ""
 
     def as_user(self) -> dict:
         return {
@@ -28,6 +32,7 @@ class AuthContext:
             "role": self.role,
             "is_system_admin": self.is_system_admin,
             "is_demo": self.is_demo,
+            "demo_token": self.demo_token,
         }
 
 
@@ -40,17 +45,20 @@ SYSTEM_ADMIN = AuthContext(
 )
 
 
-def _normalize_demo_session_id(raw: str | None) -> str:
+demo_router = APIRouter(prefix="/demo", tags=["Demo"])
+
+
+def _normalize_demo_session_token(raw: str | None) -> str:
     if not isinstance(raw, str):
         return ""
     value = raw.strip()
-    if not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", value):
+    if not DEMO_TOKEN_PATTERN.fullmatch(value):
         return ""
     return value
 
 
-def _demo_user(raw_session_id: str) -> AuthContext:
-    digest = hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()
+def _demo_user(token: str) -> AuthContext:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     session_id = digest[:32]
     return AuthContext(
         id=f"demo:{session_id}",
@@ -58,7 +66,23 @@ def _demo_user(raw_session_id: str) -> AuthContext:
         display_name="Public demo visitor",
         role="demo",
         is_demo=True,
+        demo_token=token,
     )
+
+
+@demo_router.post("/session", status_code=status.HTTP_201_CREATED)
+async def create_demo_session() -> dict:
+    if not settings.public_demo_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public demo mode is disabled.",
+        )
+    if not hasattr(metadata_store, "create_demo_session"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo sessions are unavailable.",
+        )
+    return metadata_store.create_demo_session(ttl_seconds=DEMO_SESSION_TTL_SECONDS)
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -113,9 +137,20 @@ async def require_user(
         return SYSTEM_ADMIN
 
     if settings.public_demo_mode:
-        demo_session_id = _normalize_demo_session_id(x_demo_session_id)
-        if demo_session_id:
-            return _demo_user(demo_session_id)
+        get_session = getattr(metadata_store, "get_demo_session", None)
+        if get_session is None and isinstance(x_demo_session_id, str):
+            legacy_test_token = x_demo_session_id.strip()
+            if re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", legacy_test_token):
+                return _demo_user(legacy_test_token)
+
+        demo_token = _normalize_demo_session_token(x_demo_session_id)
+        if demo_token:
+            if get_session(demo_token, ttl_seconds=DEMO_SESSION_TTL_SECONDS):
+                return _demo_user(demo_token)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing, expired, or invalid demo session token.",
+            )
 
     token = _extract_bearer_token(authorization)
     if token:

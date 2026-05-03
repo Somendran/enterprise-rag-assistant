@@ -106,6 +106,19 @@ class LocalHuggingFaceEmbeddings(Embeddings):
                 f"Embedding generation failed for model '{self.model_name}': {exc}"
             ) from exc
 
+    def embed_batch(self, texts: list[str], batch_size: int = 100) -> list[list[float]]:
+        """Embed texts in batches. Returns embeddings in the same order as input."""
+        if not texts:
+            return []
+
+        resolved_batch_size = max(1, int(batch_size or self.batch_size or 100))
+        all_embeddings: list[list[float]] = []
+        for start in range(0, len(texts), resolved_batch_size):
+            batch = texts[start : start + resolved_batch_size]
+            embeddings = self.embed_documents(batch)
+            all_embeddings.extend(embeddings)
+        return all_embeddings
+
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
 
