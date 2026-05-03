@@ -344,11 +344,27 @@
   gap: 6px;
 }
 
+.session-list-item {
+  display: flex;
+  gap: 6px;
+}
+
 .session-list button {
-  width: 100%;
   justify-content: flex-start;
   overflow-wrap: anywhere;
   text-align: left;
+}
+
+.session-list-item > button:first-child {
+  flex: 1;
+}
+
+.session-list .session-delete-btn {
+  width: 34px;
+  justify-content: center;
+  color: #8d2f2f;
+  border-color: #d8b5b5;
+  padding: 6px;
 }
 
 .session-list button.active {

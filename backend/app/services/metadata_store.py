@@ -1213,6 +1213,13 @@ def list_chat_sessions(limit: int = 30, user_id: str | None = None, include_all:
     return [dict(row) for row in rows]
 
 
+def delete_chat_session(session_id: str) -> bool:
+    with _connect() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+        cursor = conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+    return cursor.rowcount > 0
+
+
 def add_chat_message(
     *,
     message_id: str,

@@ -185,6 +185,32 @@ async def create_chat_session(
     return ChatSessionItem(**session)
 
 
+@router.delete(
+    "/chat/sessions/{session_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete chat session",
+)
+async def delete_chat_session(
+    session_id: str,
+    current_user: AuthContext = Depends(require_user),
+) -> None:
+    if current_user.is_demo:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Public demo users cannot use saved chats.")
+    session = metadata_store.get_chat_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    if current_user.role != "admin" and not current_user.is_system_admin and str(session.get("user_id", "")) != current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot delete this chat session.")
+    metadata_store.delete_chat_session(session_id)
+    metadata_store.record_audit_event(
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        action="chat.delete",
+        resource_type="chat_session",
+        resource_id=session_id,
+    )
+
+
 @router.get(
     "/chat/sessions/{session_id}/messages",
     response_model=ChatMessagesResponse,
