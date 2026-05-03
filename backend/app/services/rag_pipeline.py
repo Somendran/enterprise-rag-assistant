@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from app.services.retriever import retrieve_relevant_chunks_with_diagnostics, RetrievedChunk
-from app.services.llm_service import generate_answer
+from app.services.retriever import classify_query
 from app.services.embedding_service import get_embedding_model
 from app.services.openai_llm_service import (
     generate_response as generate_openai_response,
@@ -225,15 +225,7 @@ def _format_context(chunks, max_chars: int) -> str:
 
 
 def _is_summary_request(question: str) -> bool:
-    q = question.lower()
-    summary_hints = (
-        "summarize",
-        "summary",
-        "key points",
-        "overview",
-        "high level",
-    )
-    return any(hint in q for hint in summary_hints)
+    return classify_query(question) == "summary"
 
 
 def _base_retrieval_signal(chunks: list[RetrievedChunk]) -> float:
@@ -338,7 +330,7 @@ def _select_chunks_for_context(
     chunks = _dedupe_by_overlap(chunks)
 
     if _is_summary_request(question):
-        return chunks[: min(3, len(chunks))]
+        return chunks[: min(max(1, int(settings.summary_retrieval_top_n)), len(chunks))]
 
     if len(chunks) == 1:
         return chunks
@@ -583,6 +575,12 @@ def validate_citations(
     }
 
 
+def validate_source_markers(answer: str, valid_chunk_ids: set[str]) -> list[str]:
+    """Return source markers used by the answer that were not in the selected context."""
+    citations = _extract_source_citations(answer)
+    return sorted({citation for citation in citations if citation not in valid_chunk_ids})
+
+
 def recompute_confidence(
     claim_support_ratio: float,
     citation_coverage: float,
@@ -670,12 +668,14 @@ def run_rag_pipeline(
         question=normalized_question,
         is_simple_query=debug.is_simple_query,
     )
+    chunks_for_generation = _ordered_source_chunks(chunks_for_generation)
 
-    context_cap = (
-        max(500, int(settings.fast_mode_max_context_characters))
-        if debug.fast_mode_applied
-        else max(500, int(settings.max_context_characters))
-    )
+    if debug.query_type == "summary":
+        context_cap = max(500, int(settings.summary_max_context_characters))
+    elif debug.fast_mode_applied:
+        context_cap = max(500, int(settings.fast_mode_max_context_characters))
+    else:
+        context_cap = max(500, int(settings.max_context_characters))
     context = _format_context(
         [item.document for item in chunks_for_generation],
         max_chars=context_cap,
@@ -833,18 +833,18 @@ def run_rag_pipeline(
                 )
                 model_used = f"fallback:{local_model_used}"
         else:
-            generation_token_budget = (
-                max(1, int(settings.fast_mode_llm_max_tokens))
-                if debug.fast_mode_applied
-                else max(1, int(settings.llm_max_tokens))
-            )
-            answer, model_used, llm_retry_count, llm_retry_reason = generate_answer(
-                filled_prompt,
-                max_tokens_override=generation_token_budget,
-            )
+            raise RuntimeError("OpenAI generation is disabled. Set USE_OPENAI=true to answer questions.")
         generation_ms = (time.perf_counter() - generation_start) * 1000.0
         answer = _clean_answer_text(answer)
         answer = _dedupe_answer_bullets(answer)
+        valid_chunk_ids = {
+            _source_tag_for_index(idx) for idx in range(len(_ordered_source_chunks(chunks_for_generation)))
+        }
+        invalid_marker_citations = validate_source_markers(answer, valid_chunk_ids)
+        if invalid_marker_citations:
+            invalid_citations = sorted(set(invalid_citations + invalid_marker_citations))
+            confidence_score = min(confidence_score, 0.35)
+            confidence_level = _confidence_level(confidence_score)
 
         should_verify = (
             verification_enabled
@@ -874,7 +874,9 @@ def run_rag_pipeline(
                     valid_chunk_ids=valid_chunk_ids,
                 )
                 citation_coverage = float(citation_report.get("coverage", 0.0))
-                invalid_citations = [str(c) for c in citation_report.get("invalid_citations", [])]
+                invalid_citations = sorted(
+                    set(invalid_citations + [str(c) for c in citation_report.get("invalid_citations", [])])
+                )
                 unsupported_claims_count = len(citation_report.get("unsupported_claims", []))
 
                 confidence_score, confidence_level = recompute_confidence(
@@ -904,6 +906,10 @@ def run_rag_pipeline(
             else:
                 verification_skipped_reason = "answer_too_short"
 
+        if invalid_citations:
+            confidence_score = min(confidence_score, 0.35)
+            confidence_level = _confidence_level(confidence_score)
+
         if confidence_score < float(settings.answer_low_confidence_threshold):
             low_confidence_fallback_used = True
             answer = _apply_low_confidence_disclaimer(answer)
@@ -932,6 +938,7 @@ def run_rag_pipeline(
     total_pipeline_ms = (time.perf_counter() - start_time) * 1000.0
     diagnostics = RetrievalDiagnostics(
         query_variants_used=debug.query_variants_used,
+        query_type=debug.query_type,
         is_broad_question=debug.is_broad_question,
         is_simple_query=debug.is_simple_query,
         fast_mode_applied=debug.fast_mode_applied,

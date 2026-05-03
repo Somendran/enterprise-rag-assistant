@@ -1,112 +1,420 @@
 [
   {
     "id": "leave-policy-summary",
+    "category": "summary",
     "question": "Summarize the leave policy.",
     "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 1}],
-    "expected_keywords": ["leave"],
-    "expected_answer_regex": [],
+    "expected_keywords": ["leave", "probation", "HR portal"],
+    "expected_answer_regex": ["five\\s+business\\s+days"],
     "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Replace expected_sources with the exact HR policy PDF filename and page after indexing your sample documents."
+    "min_sources": 1
   },
   {
     "id": "leave-eligibility",
+    "category": "lookup",
     "question": "Who is eligible for annual leave?",
     "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 1}],
-    "expected_keywords": ["eligible", "leave"],
+    "expected_keywords": ["full-time", "probation", "annual leave"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with an HR handbook or leave policy PDF."
+    "min_sources": 1
+  },
+  {
+    "id": "leave-request-deadline",
+    "category": "number_date",
+    "question": "How far in advance should annual leave requests be submitted?",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 1}],
+    "expected_keywords": ["five", "business days", "HR portal"],
+    "expected_answer_regex": ["five\\s+business\\s+days"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "leave-approval-owner",
+    "category": "lookup",
+    "question": "Who approves leave requests?",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 1}],
+    "expected_keywords": ["managers", "coverage", "business continuity"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
   },
   {
     "id": "benefits-eligibility",
+    "category": "lookup",
     "question": "Who is eligible for employee benefits?",
     "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 2}],
-    "expected_keywords": ["benefits", "eligible"],
+    "expected_keywords": ["permanent", "full-time", "medical"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with a benefits policy PDF."
+    "min_sources": 1
   },
   {
-    "id": "vendor-onboarding-steps",
-    "question": "What are the vendor onboarding steps?",
-    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 1}],
-    "expected_keywords": ["vendor", "onboarding"],
-    "expected_answer_regex": [],
+    "id": "benefits-excluded-workers",
+    "category": "lookup",
+    "question": "Are contractors eligible for benefits?",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 2}],
+    "expected_keywords": ["contractors", "temporary", "written agreement"],
+    "expected_answer_regex": ["not\\s+eligible|unless"],
     "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with a procurement or vendor onboarding PDF."
+    "min_sources": 1
   },
   {
-    "id": "vendor-required-documents",
-    "question": "What documents are required before a vendor can be approved?",
-    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 2}],
-    "expected_keywords": ["vendor", "document"],
-    "expected_answer_regex": [],
+    "id": "benefits-enrollment-deadline",
+    "category": "number_date",
+    "question": "When must benefits enrollment be completed?",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 2}],
+    "expected_keywords": ["thirty days", "start date"],
+    "expected_answer_regex": ["thirty\\s+days"],
     "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Add source expectations after indexing vendor onboarding material."
-  },
-  {
-    "id": "sla-escalation-path",
-    "question": "Where is the SLA escalation path documented?",
-    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 1}],
-    "expected_keywords": ["sla", "escalation"],
-    "expected_answer_regex": [],
-    "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with an SLA or support process PDF."
-  },
-  {
-    "id": "security-access-control",
-    "question": "What does the security policy require for access control?",
-    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 1}],
-    "expected_keywords": ["security", "access"],
-    "expected_answer_regex": [],
-    "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with security or compliance material."
-  },
-  {
-    "id": "incident-reporting",
-    "question": "How should employees report a security incident?",
-    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 2}],
-    "expected_keywords": ["incident", "report"],
-    "expected_answer_regex": [],
-    "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with security operations or incident response PDFs."
-  },
-  {
-    "id": "data-retention",
-    "question": "What are the data retention requirements?",
-    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 3}],
-    "expected_keywords": ["data", "retention"],
-    "expected_answer_regex": [],
-    "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with compliance, privacy, or records management PDFs."
+    "min_sources": 1
   },
   {
     "id": "travel-reimbursement",
+    "category": "lookup",
     "question": "What expenses are reimbursable for business travel?",
     "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 3}],
-    "expected_keywords": ["travel", "reimburs"],
+    "expected_keywords": ["airfare", "lodging", "meals"],
     "expected_answer_regex": [],
     "min_confidence": 0.2,
-    "min_sources": 1,
-    "notes": "Use this with travel or expense policy PDFs."
+    "min_sources": 1
   },
   {
-    "id": "answerability-negative-control",
+    "id": "travel-receipts-deadline",
+    "category": "number_date",
+    "question": "How long after a trip do employees have to submit receipts?",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 3}],
+    "expected_keywords": ["receipts", "fourteen days"],
+    "expected_answer_regex": ["fourteen\\s+days"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "vendor-onboarding-summary",
+    "category": "summary",
+    "question": "Summarize the vendor onboarding process.",
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 1}],
+    "expected_keywords": ["sponsorship", "procurement", "approvals"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "vendor-onboarding-steps",
+    "category": "lookup",
+    "question": "What are the vendor onboarding steps?",
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 1}],
+    "expected_keywords": ["due diligence", "security review", "contract approval"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "vendor-record-created",
+    "category": "lookup",
+    "question": "When does procurement create the vendor record?",
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 1}],
+    "expected_keywords": ["after approvals", "complete"],
+    "expected_answer_regex": ["after\\s+approvals\\s+are\\s+complete"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "vendor-required-documents",
+    "category": "lookup",
+    "question": "What documents are required before a vendor can be approved?",
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 2}],
+    "expected_keywords": ["signed contract", "tax form", "bank details", "insurance"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "vendor-high-risk-extra-document",
+    "category": "lookup",
+    "question": "What extra assessment is required for high-risk vendors?",
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 2}],
+    "expected_keywords": ["data protection impact assessment", "high-risk"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "sla-escalation-path",
+    "category": "lookup",
+    "question": "Where is the SLA escalation path documented?",
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 1}],
+    "expected_keywords": ["Support Operations runbook", "escalation"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "sla-p1-escalation",
+    "category": "number_date",
+    "question": "When do priority one incidents escalate?",
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 1}],
+    "expected_keywords": ["priority one", "duty manager", "fifteen minutes"],
+    "expected_answer_regex": ["fifteen\\s+minutes"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "sla-p2-escalation",
+    "category": "number_date",
+    "question": "When do priority two incidents escalate?",
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 1}],
+    "expected_keywords": ["priority two", "service owner", "four business hours"],
+    "expected_answer_regex": ["four\\s+business\\s+hours"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "sla-response-targets-summary",
+    "category": "summary",
+    "question": "Summarize the support response targets.",
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 2}],
+    "expected_keywords": ["priority one", "priority two", "priority three"],
+    "expected_answer_regex": ["fifteen\\s+minutes|four\\s+business\\s+hours|two\\s+business\\s+days"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "sla-p3-response-target",
+    "category": "number_date",
+    "question": "What is the priority three response target?",
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 2}],
+    "expected_keywords": ["priority three", "two business days"],
+    "expected_answer_regex": ["two\\s+business\\s+days"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "security-access-control",
+    "category": "lookup",
+    "question": "What does the security policy require for access control?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 1}],
+    "expected_keywords": ["unique user accounts", "multi-factor", "manager approval"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "security-privileged-review",
+    "category": "number_date",
+    "question": "How often must privileged access be reviewed?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 1}],
+    "expected_keywords": ["quarterly", "system owners"],
+    "expected_answer_regex": ["quarterly"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "security-shared-accounts",
+    "category": "lookup",
+    "question": "Are shared accounts allowed?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 1}],
+    "expected_keywords": ["prohibited", "exception", "security"],
+    "expected_answer_regex": ["prohibited|documented\\s+exception"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "incident-reporting",
+    "category": "lookup",
+    "question": "How should employees report a security incident?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 2}],
+    "expected_keywords": ["security operations mailbox", "immediately"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "incident-customer-data-escalation",
+    "category": "number_date",
+    "question": "When must incidents involving customer data be escalated?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 2}],
+    "expected_keywords": ["customer data", "legal", "privacy", "twenty-four hours"],
+    "expected_answer_regex": ["twenty-four\\s+hours"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "data-retention",
+    "category": "lookup",
+    "question": "What are the data retention requirements?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 3}],
+    "expected_keywords": ["business records", "retention schedule", "security logs"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "security-log-retention",
+    "category": "number_date",
+    "question": "How long are security logs retained?",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 3}],
+    "expected_keywords": ["security logs", "one year", "legal hold"],
+    "expected_answer_regex": ["one\\s+year"],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "compare-p1-p2-response-targets",
+    "category": "comparison",
+    "question": "Compare priority one and priority two support response targets.",
+    "expected_sources": [{"document": "SLA_Support_Process.pdf", "page": 2}],
+    "expected_keywords": ["priority one", "fifteen minutes", "priority two", "four business hours"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "compare-benefits-contractors-full-time",
+    "category": "comparison",
+    "question": "Compare benefits eligibility for full-time employees and contractors.",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 2}],
+    "expected_keywords": ["full-time", "contractors", "written agreement"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "multi-doc-approval-controls",
+    "category": "multi_document",
+    "question": "Which processes require manager or approval review across HR, vendor onboarding, and security access?",
+    "expected_sources": [
+      {"document": "Employee_Handbook.pdf", "page": 1},
+      {"document": "Vendor_Onboarding_Guide.pdf", "page": 1},
+      {"document": "Security_Access_Control_Policy.pdf", "page": 1}
+    ],
+    "expected_keywords": ["manager", "approvals", "access"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.15,
+    "min_sources": 2
+  },
+  {
+    "id": "multi-doc-deadlines",
+    "category": "multi_document",
+    "question": "List the documented time windows for leave requests, benefits enrollment, receipts, incidents, and security log retention.",
+    "expected_sources": [
+      {"document": "Employee_Handbook.pdf"},
+      {"document": "Security_Access_Control_Policy.pdf"}
+    ],
+    "expected_keywords": ["five business days", "thirty days", "fourteen days", "twenty-four hours", "one year"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.15,
+    "min_sources": 2
+  },
+  {
+    "id": "all-documents-summary",
+    "category": "summary",
+    "question": "Summarize all indexed sample documents at a high level.",
+    "expected_sources": [
+      {"document": "Employee_Handbook.pdf"},
+      {"document": "Vendor_Onboarding_Guide.pdf"},
+      {"document": "SLA_Support_Process.pdf"},
+      {"document": "Security_Access_Control_Policy.pdf"}
+    ],
+    "expected_keywords": ["employee", "vendor", "SLA", "security"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.1,
+    "min_sources": 3
+  },
+  {
+    "id": "table-like-required-lists",
+    "category": "table_like",
+    "question": "List the required vendor documents as a checklist.",
+    "expected_sources": [{"document": "Vendor_Onboarding_Guide.pdf", "page": 2}],
+    "expected_keywords": ["signed contract", "tax form", "bank details", "insurance certificate", "security questionnaire"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "table-like-travel-expenses",
+    "category": "table_like",
+    "question": "List reimbursable travel expenses as a checklist.",
+    "expected_sources": [{"document": "Employee_Handbook.pdf", "page": 3}],
+    "expected_keywords": ["airfare", "lodging", "ground transportation", "meals"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "table-like-access-requirements",
+    "category": "table_like",
+    "question": "List the access control requirements as bullets.",
+    "expected_sources": [{"document": "Security_Access_Control_Policy.pdf", "page": 1}],
+    "expected_keywords": ["unique user accounts", "multi-factor authentication", "manager approval"],
+    "expected_answer_regex": [],
+    "min_confidence": 0.2,
+    "min_sources": 1
+  },
+  {
+    "id": "negative-coffee-machine",
+    "category": "negative",
     "question": "What is the office coffee machine serial number?",
     "expected_sources": [],
-    "expected_keywords": ["not", "document"],
-    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)"],
+    "expected_keywords": [],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)|i don't know|not enough"],
+    "must_refuse": true,
     "min_confidence": 0.0,
-    "min_sources": 0,
-    "notes": "Negative control: keep or replace with a question that should not be answerable from your PDFs."
+    "min_sources": 0
+  },
+  {
+    "id": "negative-ceo-phone",
+    "category": "negative",
+    "question": "What is the CEO's personal phone number?",
+    "expected_sources": [],
+    "expected_keywords": [],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)|i don't know|not enough"],
+    "must_refuse": true,
+    "min_confidence": 0.0,
+    "min_sources": 0
+  },
+  {
+    "id": "negative-office-address",
+    "category": "negative",
+    "question": "What is the Singapore office street address?",
+    "expected_sources": [],
+    "expected_keywords": [],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)|i don't know|not enough"],
+    "must_refuse": true,
+    "min_confidence": 0.0,
+    "min_sources": 0
+  },
+  {
+    "id": "negative-password-policy",
+    "category": "negative",
+    "question": "What is the minimum password length?",
+    "expected_sources": [],
+    "expected_keywords": [],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)|i don't know|not enough"],
+    "must_refuse": true,
+    "min_confidence": 0.0,
+    "min_sources": 0
+  },
+  {
+    "id": "negative-payroll-date",
+    "category": "negative",
+    "question": "What date is payroll processed each month?",
+    "expected_sources": [],
+    "expected_keywords": [],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)|i don't know|not enough"],
+    "must_refuse": true,
+    "min_confidence": 0.0,
+    "min_sources": 0
+  },
+  {
+    "id": "negative-vpn-tool",
+    "category": "negative",
+    "question": "Which VPN tool does the company use?",
+    "expected_sources": [],
+    "expected_keywords": [],
+    "expected_answer_regex": ["not.*(provided|available|document|context)|cannot.*(determine|answer)|i don't know|not enough"],
+    "must_refuse": true,
+    "min_confidence": 0.0,
+    "min_sources": 0
   }
 ]

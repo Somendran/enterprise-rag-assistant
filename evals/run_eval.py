@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ class EvalResult:
     eval_id: str
     passed: bool
     message: str
+    metrics: dict[str, Any]
 
 
 def load_evals(path: Path) -> list[dict[str, Any]]:
@@ -40,6 +42,8 @@ def load_evals(path: Path) -> list[dict[str, Any]]:
         item.setdefault("expected_answer_regex", [])
         item.setdefault("min_confidence", 0.0)
         item.setdefault("min_sources", 0)
+        item.setdefault("category", "general")
+        item.setdefault("must_refuse", False)
     return payload
 
 
@@ -57,8 +61,11 @@ def call_query(api_url: str, api_key: str, question: str, timeout: int) -> dict[
     )
 
     try:
+        start = time.perf_counter()
         with request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            payload = json.loads(response.read().decode("utf-8"))
+        payload["_latency_ms"] = round((time.perf_counter() - start) * 1000.0, 2)
+        return payload
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
@@ -97,6 +104,12 @@ def score_eval(item: dict[str, Any], payload: dict[str, Any]) -> EvalResult:
         for pattern in item.get("expected_answer_regex", [])
         if not re.search(str(pattern), answer, re.IGNORECASE | re.MULTILINE)
     ]
+    refusal_expected = bool(item.get("must_refuse", False))
+    refusal_pattern = re.compile(
+        r"\b(i don't know|not enough|insufficient|cannot determine|cannot answer|not provided|not available)\b",
+        re.IGNORECASE,
+    )
+    refused = bool(refusal_pattern.search(answer))
     confidence = payload.get("confidence_score")
     try:
         confidence_value = float(confidence)
@@ -118,15 +131,59 @@ def score_eval(item: dict[str, Any], payload: dict[str, Any]) -> EvalResult:
         failures.append(f"confidence {confidence_value:.3f} below {min_confidence:.3f}")
     if len(sources) < min_sources:
         failures.append(f"sources {len(sources)} below {min_sources}")
+    if refusal_expected and not refused:
+        failures.append("expected refusal but answer attempted a response")
+    if (not refusal_expected) and refused and min_sources > 0:
+        failures.append("unexpected refusal")
+
+    metrics = {
+        "category": str(item.get("category", "general")),
+        "latency_ms": float(payload.get("_latency_ms", 0.0) or 0.0),
+        "confidence": confidence_value,
+        "source_hit": not missing_sources,
+        "keyword_hit": not missing_keywords,
+        "regex_hit": not missing_patterns,
+        "refused": refused,
+        "must_refuse": refusal_expected,
+        "source_count": len(sources),
+    }
 
     if failures:
-        return EvalResult(str(item["id"]), False, "; ".join(failures))
+        return EvalResult(str(item["id"]), False, "; ".join(failures), metrics)
 
     return EvalResult(
         str(item["id"]),
         True,
-        f"answer_chars={len(answer)} sources={len(sources)} confidence={confidence_value:.3f}",
+        f"answer_chars={len(answer)} sources={len(sources)} confidence={confidence_value:.3f} latency_ms={metrics['latency_ms']:.1f}",
+        metrics,
     )
+
+
+def print_metric_summary(results: list[EvalResult]) -> None:
+    if not results:
+        return
+
+    def pct(count: int, total: int) -> str:
+        return f"{(100.0 * count / max(1, total)):.1f}%"
+
+    total = len(results)
+    passed = sum(1 for result in results if result.passed)
+    source_hits = sum(1 for result in results if bool(result.metrics.get("source_hit")))
+    keyword_hits = sum(1 for result in results if bool(result.metrics.get("keyword_hit")))
+    regex_hits = sum(1 for result in results if bool(result.metrics.get("regex_hit")))
+    refusal_cases = [result for result in results if bool(result.metrics.get("must_refuse"))]
+    refusal_hits = sum(1 for result in refusal_cases if bool(result.metrics.get("refused")))
+    latencies = [float(result.metrics.get("latency_ms", 0.0) or 0.0) for result in results]
+    avg_latency = sum(latencies) / max(1, len(latencies))
+
+    print("\nMetrics:")
+    print(f"- pass_rate={pct(passed, total)}")
+    print(f"- source_hit_rate={pct(source_hits, total)}")
+    print(f"- keyword_hit_rate={pct(keyword_hits, total)}")
+    print(f"- regex_hit_rate={pct(regex_hits, total)}")
+    if refusal_cases:
+        print(f"- refusal_hit_rate={pct(refusal_hits, len(refusal_cases))}")
+    print(f"- avg_latency_ms={avg_latency:.1f}")
 
 
 def main() -> int:
@@ -151,13 +208,14 @@ def main() -> int:
             payload = call_query(args.api_url, args.api_key, str(item["question"]), args.timeout)
             result = score_eval(item, payload)
         except Exception as exc:
-            result = EvalResult(str(item["id"]), False, str(exc))
+            result = EvalResult(str(item["id"]), False, str(exc), {"category": str(item.get("category", "general"))})
         results.append(result)
         status = "PASS" if result.passed else "FAIL"
         print(f"{status} {result.eval_id}: {result.message}")
 
     failed = [result for result in results if not result.passed]
     print(f"\nSummary: {len(results) - len(failed)}/{len(results)} passed.")
+    print_metric_summary(results)
     return 1 if failed else 0
 
 

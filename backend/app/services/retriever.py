@@ -42,6 +42,7 @@ class RetrievalDebugInfo:
     """Execution metadata for observability and tuning."""
 
     query_variants_used: list[str]
+    query_type: str
     is_broad_question: bool
     is_simple_query: bool
     fast_mode_applied: bool
@@ -64,6 +65,23 @@ def _is_broad_question(question: str) -> bool:
         "what is",
     ]
     return any(token in text for token in broad_signals) or len(text.split()) <= 6
+
+
+def classify_query(question: str) -> str:
+    """Return a coarse query profile used for retrieval and eval diagnostics."""
+    text = normalize_query(question)
+    if not text:
+        return "general"
+
+    if any(term in text for term in ("summarize", "summary", "overview", "key points", "high level")):
+        return "summary"
+    if any(term in text for term in ("compare", "difference", "versus", " vs ", "similarities", "tradeoff", "trade-off")):
+        return "comparison"
+    if any(term in text for term in ("how many", "how much", "what date", "when", "within", "at least")):
+        return "lookup"
+    if any(term in text for term in ("analyze", "evaluate", "risk", "impact", "why", "implication", "exceptions")):
+        return "complex"
+    return "general"
 
 
 def is_simple_query(query: str) -> bool:
@@ -230,11 +248,17 @@ def _normalize_reranker_score(score: float) -> float:
 def _reranker_skip_reason(
     *,
     fast_mode_applied: bool,
+    query_type: str,
     initial_candidates: list[RetrievedChunk],
     final_top_n: int,
 ) -> str:
     if not settings.enable_neural_reranker:
         return "reranker_disabled"
+
+    if bool(settings.complex_query_rerank_always) and query_type in {"summary", "comparison", "complex"}:
+        if not initial_candidates:
+            return "no_candidates"
+        return ""
 
     if fast_mode_applied:
         return "fast_mode_simple_query"
@@ -433,13 +457,19 @@ def retrieve_relevant_chunks_with_diagnostics(
         )
 
     simple_query = is_simple_query(question)
-    fast_mode_applied = bool(settings.fast_mode_enabled and simple_query)
-
-    final_top_n = (
-        max(1, int(settings.fast_mode_top_n))
-        if fast_mode_applied
-        else max(1, int(settings.retrieval_top_n))
+    query_type = classify_query(question)
+    fast_mode_applied = bool(
+        settings.fast_mode_enabled
+        and simple_query
+        and query_type not in {"summary", "comparison", "complex"}
     )
+
+    if query_type == "summary":
+        final_top_n = max(1, int(settings.summary_retrieval_top_n))
+    elif fast_mode_applied:
+        final_top_n = max(1, int(settings.fast_mode_top_n))
+    else:
+        final_top_n = max(1, int(settings.retrieval_top_n))
     configured_initial_top_k = (
         max(final_top_n, int(settings.fast_mode_initial_top_k))
         if fast_mode_applied
@@ -545,6 +575,7 @@ def retrieve_relevant_chunks_with_diagnostics(
     reranker_applied = False
     reranker_skipped_reason = _reranker_skip_reason(
         fast_mode_applied=fast_mode_applied,
+        query_type=query_type,
         initial_candidates=initial_candidates,
         final_top_n=final_top_n,
     )
@@ -618,6 +649,7 @@ def retrieve_relevant_chunks_with_diagnostics(
 
     return selected, RetrievalDebugInfo(
         query_variants_used=query_variants,
+        query_type=query_type,
         is_broad_question=is_broad,
         is_simple_query=simple_query,
         fast_mode_applied=fast_mode_applied,

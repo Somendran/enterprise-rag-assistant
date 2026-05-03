@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     # -1 lets Ollama auto-detect and use available GPU resources.
     local_llm_num_gpu: int = -1
 
-    # OpenAI generation (optional primary path)
-    use_openai: bool = False
+    # OpenAI generation.
+    use_openai: bool = True
     openai_api_key: str = ""
     openai_model: str = "gpt-5.4-mini"
     openai_max_tokens: int = 320
@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Retrieval
     # Final number of chunks passed to the LLM after reranking.
     retrieval_top_n: int = 6
+    # Wider profile for summary/synthesis questions.
+    summary_retrieval_top_n: int = 8
+    summary_max_context_characters: int = 9000
+    complex_query_rerank_always: bool = True
     # How many candidates to gather before neural reranking.
     retrieval_initial_top_k: int = 40
     # Backward-compat alias used in some call paths.

@@ -68,31 +68,34 @@ async def model_health(_: AuthContext = Depends(require_admin)) -> ModelHealthRe
         _check_import("flag_embedding_reranker", "FlagEmbedding"),
     ]
 
-    try:
-        response = requests.get(
-            settings.local_llm_endpoint.replace("/api/generate", "/api/tags"),
-            timeout=3,
-        )
-        response.raise_for_status()
-        models = [
-            item.get("name", "")
-            for item in response.json().get("models", [])
-            if isinstance(item, dict)
-        ]
-        status_value = "ok" if settings.local_llm_model in models else "warning"
-        checks.append(
-            ModelHealthItem(
-                name="ollama",
-                status=status_value,
-                detail=(
-                    f"model '{settings.local_llm_model}' available"
-                    if status_value == "ok"
-                    else f"reachable, but '{settings.local_llm_model}' was not listed"
-                ),
+    if settings.use_openai and not settings.openai_fallback_to_local:
+        checks.append(ModelHealthItem(name="ollama", status="skipped", detail="OpenAI-only generation is enabled."))
+    else:
+        try:
+            response = requests.get(
+                settings.local_llm_endpoint.replace("/api/generate", "/api/tags"),
+                timeout=3,
             )
-        )
-    except Exception as exc:
-        checks.append(ModelHealthItem(name="ollama", status="error", detail=str(exc)))
+            response.raise_for_status()
+            models = [
+                item.get("name", "")
+                for item in response.json().get("models", [])
+                if isinstance(item, dict)
+            ]
+            status_value = "ok" if settings.local_llm_model in models else "warning"
+            checks.append(
+                ModelHealthItem(
+                    name="ollama",
+                    status=status_value,
+                    detail=(
+                        f"model '{settings.local_llm_model}' available"
+                        if status_value == "ok"
+                        else f"reachable, but '{settings.local_llm_model}' was not listed"
+                    ),
+                )
+            )
+        except Exception as exc:
+            checks.append(ModelHealthItem(name="ollama", status="error", detail=str(exc)))
 
     checks.append(
         ModelHealthItem(

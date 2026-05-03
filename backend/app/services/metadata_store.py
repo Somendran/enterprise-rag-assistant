@@ -94,6 +94,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback(created_at DESC)")
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS query_diagnostics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            question TEXT NOT NULL,
+            answer_preview TEXT NOT NULL DEFAULT '',
+            confidence_score REAL,
+            confidence_level TEXT NOT NULL DEFAULT '',
+            query_type TEXT NOT NULL DEFAULT '',
+            sources_json TEXT NOT NULL DEFAULT '[]',
+            diagnostics_json TEXT NOT NULL DEFAULT '{}',
+            latency_ms REAL NOT NULL DEFAULT 0.0
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_query_diagnostics_created_at ON query_diagnostics(created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_query_diagnostics_query_type ON query_diagnostics(query_type)")
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS ingestion_jobs (
             id TEXT PRIMARY KEY,
             created_at INTEGER NOT NULL,
@@ -769,6 +788,67 @@ def record_feedback(
     }
 
 
+def record_query_diagnostic(
+    *,
+    user_id: str = "",
+    question: str,
+    answer: str,
+    confidence_score: float | None = None,
+    confidence_level: str = "",
+    sources: list[dict[str, Any]] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    latency_ms: float = 0.0,
+) -> dict[str, Any]:
+    created_at = int(time.time())
+    diagnostics_payload = diagnostics or {}
+    query_type = str(diagnostics_payload.get("query_type", "") or "")
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO query_diagnostics (
+                created_at, user_id, question, answer_preview, confidence_score,
+                confidence_level, query_type, sources_json, diagnostics_json, latency_ms
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                user_id,
+                question,
+                answer[:500],
+                confidence_score,
+                confidence_level,
+                query_type,
+                json.dumps(sources or []),
+                json.dumps(diagnostics_payload),
+                float(latency_ms),
+            ),
+        )
+        row_id = int(cursor.lastrowid)
+    return {"id": row_id, "created_at": created_at, "query_type": query_type}
+
+
+def list_query_diagnostics(limit: int = 50) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, user_id, question, answer_preview, confidence_score,
+                   confidence_level, query_type, sources_json, diagnostics_json, latency_ms
+            FROM query_diagnostics
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 200)),),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["sources"] = json.loads(item.pop("sources_json") or "[]")
+        item["diagnostics"] = json.loads(item.pop("diagnostics_json") or "{}")
+        items.append(item)
+    return items
+
+
 def list_feedback(limit: int = 20) -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(
@@ -791,6 +871,9 @@ def admin_summary() -> dict[str, Any]:
         feedback_row = conn.execute(
             "SELECT COUNT(*) AS count FROM feedback"
         ).fetchone()
+        query_diag_row = conn.execute(
+            "SELECT COUNT(*) AS count FROM query_diagnostics"
+        ).fetchone()
         recent_feedback = conn.execute(
             """
             SELECT id, created_at, question, rating, reason, confidence_score
@@ -808,6 +891,7 @@ def admin_summary() -> dict[str, Any]:
         "document_count": int(doc_row["count"] if doc_row else 0),
         "chunk_count": int(doc_row["chunks"] if doc_row else 0),
         "feedback_count": int(feedback_row["count"] if feedback_row else 0),
+        "query_diagnostic_count": int(query_diag_row["count"] if query_diag_row else 0),
         "chat_session_count": int(sessions_row["count"] if sessions_row else 0),
         "eval_run_count": int(eval_row["count"] if eval_row else 0),
         "user_count": int(users_row["count"] if users_row else 0),

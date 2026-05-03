@@ -126,6 +126,8 @@ class DocumentChunkItem(BaseModel):
     page: int = Field(default=0, description="Source page.")
     section: str = Field(default="", description="Detected section or heading.")
     chunk_index: int = Field(default=0, description="Chunk order within the document.")
+    quality_score: float = Field(default=0.0, description="Heuristic quality score in range [0, 1].")
+    quality_warnings: List[str] = Field(default_factory=list, description="Chunk inspection warnings.")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Raw chunk metadata.")
 
 
@@ -184,6 +186,7 @@ class RetrievalDiagnostics(BaseModel):
     """Debug-friendly retrieval diagnostics for quality tuning and observability."""
 
     query_variants_used: List[str] = Field(default_factory=list)
+    query_type: str = Field(default="general")
     is_broad_question: bool = Field(default=False)
     is_simple_query: bool = Field(default=False)
     fast_mode_applied: bool = Field(default=False)
@@ -278,6 +281,7 @@ class AdminOverviewResponse(BaseModel):
     document_count: int
     chunk_count: int
     feedback_count: int
+    query_diagnostic_count: int = 0
     chat_session_count: int = 0
     eval_run_count: int = 0
     user_count: int = 0

@@ -372,17 +372,38 @@ def list_document_chunks(
     doc_dict = getattr(docstore, "_dict", {}) if docstore is not None else {}
     chunks: list[dict[str, Any]] = []
 
+    def _inspect_chunk_quality(text: str, metadata: dict[str, Any]) -> tuple[float, list[str]]:
+        compact = re.sub(r"\s+", " ", text or "").strip()
+        warnings: list[str] = []
+        if len(compact) < 80:
+            warnings.append("short_chunk")
+        if not str(metadata.get("section") or metadata.get("section_hint") or "").strip():
+            warnings.append("missing_section")
+        alnum = re.sub(r"[^a-zA-Z0-9]", "", compact)
+        if compact and (len(alnum) / max(1, len(compact))) < 0.45:
+            warnings.append("low_text_signal")
+        if re.search(r"([A-Za-z])\1{4,}", compact):
+            warnings.append("repeated_ocr_artifact")
+        if len(compact) > 1800:
+            warnings.append("oversized_chunk")
+        score = max(0.0, 1.0 - (0.18 * len(warnings)))
+        return round(score, 4), warnings
+
     for docstore_id, doc in doc_dict.items():
         metadata = getattr(doc, "metadata", {}) or {}
         if metadata.get("file_hash") != file_hash:
             continue
+        content = str(getattr(doc, "page_content", "") or "")
+        quality_score, quality_warnings = _inspect_chunk_quality(content, metadata)
         chunks.append(
             {
                 "id": str(docstore_id),
-                "content": str(getattr(doc, "page_content", "") or ""),
+                "content": content,
                 "page": int(metadata.get("page", 0) or 0),
                 "section": str(metadata.get("section") or metadata.get("section_hint") or ""),
                 "chunk_index": int(metadata.get("chunk_index", 0) or 0),
+                "quality_score": quality_score,
+                "quality_warnings": quality_warnings,
                 "metadata": dict(metadata),
             }
         )

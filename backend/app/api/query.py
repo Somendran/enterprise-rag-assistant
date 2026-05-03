@@ -129,6 +129,16 @@ async def query_knowledge_base(
             "confidence_score": result.confidence_score,
         },
     )
+    metadata_store.record_query_diagnostic(
+        user_id=current_user.id,
+        question=request.question,
+        answer=result.answer,
+        confidence_score=result.confidence_score,
+        confidence_level=result.confidence_level,
+        sources=[s.model_dump() for s in result.sources],
+        diagnostics=result.diagnostics.model_dump(),
+        latency_ms=elapsed * 1000.0,
+    )
 
     return QueryResponse(
         answer=result.answer,
@@ -200,6 +210,16 @@ async def query_knowledge_base_stream(
                     "sources": [src.document for src in result.sources],
                     "confidence_score": result.confidence_score,
                 },
+            )
+            metadata_store.record_query_diagnostic(
+                user_id=current_user.id,
+                question=request.question,
+                answer=result.answer,
+                confidence_score=result.confidence_score,
+                confidence_level=result.confidence_level,
+                sources=[src.model_dump() for src in result.sources],
+                diagnostics=result.diagnostics.model_dump(),
+                latency_ms=elapsed * 1000.0,
             )
             events.put(("done", payload))
         except Exception as exc:

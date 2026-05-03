@@ -8,7 +8,7 @@ Retrieval-Augmented Generation assistant for local knowledge bases. It lets you 
 - Safer upload handling with simple filename validation, PDF byte checks, and configurable upload size limits.
 - Hybrid retrieval over FAISS-backed vectors plus lexical/BM25-style signals.
 - Optional neural reranking with FlagEmbedding.
-- Local-first generation through Ollama, with optional OpenAI generation.
+- OpenAI generation by default, with local Ollama settings retained only for explicitly enabled fallback paths.
 - Server-Sent Events (SSE) streaming for chat responses.
 - Source references, confidence diagnostics, and optional post-generation verification.
 - React + Vite frontend for background upload jobs, chat history, document management, source chunk review, feedback, reset, and retrieved-context review.
@@ -179,6 +179,9 @@ After the backend is live, seed the curated PDFs so visitors can try the app imm
 | `DEMO_QUERIES_PER_HOUR` | Anonymous query requests allowed per session per hour. |
 | `EMBEDDING_MODEL` | Local sentence-transformers embedding model. |
 | `EMBEDDING_DEVICE` | Embedding runtime device. Use `cpu`, `auto`, `cuda`, or `cuda:<index>` when CUDA-enabled PyTorch is available. |
+| `SUMMARY_RETRIEVAL_TOP_N` | Wider final chunk count for summary/synthesis queries. |
+| `SUMMARY_MAX_CONTEXT_CHARACTERS` | Context budget used for summary/synthesis queries. |
+| `COMPLEX_QUERY_RERANK_ALWAYS` | Forces reranking for summary, comparison, and complex query profiles when reranking is enabled. |
 | `USE_OPENAI` | Route generation through OpenAI when enabled. |
 | `OPENAI_API_KEY` | OpenAI key for generation, summaries, or vision enrichment. |
 | `OPENAI_FALLBACK_TO_LOCAL` | Optional local Ollama fallback when OpenAI generation fails. Keep `false` to use OpenAI only. |
